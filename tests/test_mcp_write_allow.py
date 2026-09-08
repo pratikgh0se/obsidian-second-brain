@@ -143,3 +143,32 @@ def test_a_prefix_does_not_match_a_sibling_by_name(vault, monkeypatch):
     monkeypatch.setenv("OBSIDIAN_MCP_WRITE_ALLOW", "Inbox")
     assert "error" in ops.update_note("Inboxes/Sneaky.md", append="NOPE")
     assert "updated" in ops.update_note("Inbox/Idea.md", append="FINE")
+
+
+def test_matching_is_case_sensitive(vault, monkeypatch):
+    v, ops = vault
+    monkeypatch.setenv("OBSIDIAN_MCP_WRITE_ALLOW", "knowledge/")
+    assert "error" in ops.update_note("Knowledge/Finding.md", append="NOPE")
+
+
+def test_a_degenerate_slash_only_prefix_does_not_widen_the_allowlist(vault, monkeypatch):
+    v, ops = vault
+    monkeypatch.setenv("OBSIDIAN_MCP_WRITE_ALLOW", "Inbox/:/")
+    assert ops._write_allow() == ["Inbox/"]
+    result = ops.update_note("Boards/Engineering.md", append="FORGED CARD")
+    assert "error" in result, result
+    assert "updated" in ops.update_note("Inbox/Idea.md", append="FINE")
+
+
+def test_a_lone_slash_is_read_only(vault, monkeypatch):
+    v, ops = vault
+    monkeypatch.setenv("OBSIDIAN_MCP_WRITE_ALLOW", "/")
+    assert ops._write_allow() == []
+    assert "error" in ops.update_note("Inbox/Idea.md", append="NOPE")
+
+
+def test_a_double_slash_is_read_only(vault, monkeypatch):
+    v, ops = vault
+    monkeypatch.setenv("OBSIDIAN_MCP_WRITE_ALLOW", "//")
+    assert ops._write_allow() == []
+    assert "error" in ops.update_note("Inbox/Idea.md", append="NOPE")

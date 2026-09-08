@@ -64,13 +64,27 @@ def _write_allow() -> Optional[List[str]]:
     process, and the tests set the variable per case.
 
     Three states: unset -> None (unrestricted); set -> the colon-separated
-    prefixes; empty (or all-separators) -> [] (read-only, no write tool can
-    name a path).
+    prefixes; empty (or every entry degenerate) -> [] (read-only, no write
+    tool can name a path).
+
+    Matching is case-sensitive and by whole path component (see
+    `_write_denied`), so the comparison base has to be exact: an entry that is
+    only slashes (`/`, `//`) strips down to `""` and is dropped here rather
+    than kept - `""` is not a valid component and must never be allowed to
+    reach `_write_denied`, where an empty prefix would otherwise match every
+    path. A var set to only such entries is therefore read-only, not
+    unrestricted: e.g. `"Inbox/:/"` allows only `Inbox/`, and `"/"` alone (or
+    `"//"`, or any string of only `:` and `/`) allows nothing.
     """
     raw = os.environ.get(_WRITE_ALLOW_ENV)
     if raw is None:
         return None
-    return [p.strip().lstrip("/") for p in raw.split(":") if p.strip()]
+    prefixes = []
+    for p in raw.split(":"):
+        cleaned = p.strip().lstrip("/")
+        if cleaned:
+            prefixes.append(cleaned)
+    return prefixes
 
 
 def _write_denied(vault: Path, target: Path) -> Optional[Dict[str, Any]]:
@@ -81,8 +95,14 @@ def _write_denied(vault: Path, target: Path) -> Optional[Dict[str, Any]]:
     why a bogus prefix (`..`, `/`) in the list can never widen anything: the
     comparison is between two paths that are both already inside the vault.
 
-    A prefix matches a whole path component, not a string prefix: `Inbox`
-    allows `Inbox/x.md` and `Inbox/sub/x.md`, and never `Inboxes/x.md`.
+    A prefix matches a whole path component, case-sensitively, not a string
+    prefix: `Inbox` allows `Inbox/x.md` and `Inbox/sub/x.md`, and never
+    `Inboxes/x.md` or `inbox/x.md`.
+
+    An empty prefix is always skipped rather than treated as a match: even
+    though `_write_allow` already drops degenerate (all-slash) entries before
+    they get here, this loop stays defensive so a stray `""` can never widen
+    the allowlist to everything.
     """
     allow = _write_allow()
     if allow is None:
@@ -90,7 +110,9 @@ def _write_denied(vault: Path, target: Path) -> Optional[Dict[str, Any]]:
     rel = target.relative_to(vault).as_posix()
     for prefix in allow:
         p = prefix.rstrip("/")
-        if not p or rel == p or rel.startswith(p + "/"):
+        if not p:
+            continue
+        if rel == p or rel.startswith(p + "/"):
             return None
     named = ", ".join(allow) if allow else "(none: this connection is read-only)"
     return {"error": f"this connection may only write under: {named}; "
