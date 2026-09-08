@@ -48,6 +48,55 @@ _SKIP_DIRS = {".obsidian", ".git", ".trash", "_trash", ".claude", "_export",
 # lowercase set against un-lowercased path parts, so it never matched.
 _PROTECTED_WRITE_DIRS = _SKIP_DIRS | {"raw"}
 
+# Per-client write fence (agent-ops decision row 93, 2026-09-08). The Hermes
+# worker profiles mount this server with the full write surface and the client
+# cannot disable single tools, so the scope switch lives here: one env var per
+# profile naming the vault-relative folder prefixes that profile may write.
+# Unset means unrestricted, which is what every other client (Claude Desktop,
+# Claude Code, Cursor) sees - this changes nothing for them.
+_WRITE_ALLOW_ENV = "OBSIDIAN_MCP_WRITE_ALLOW"
+
+
+def _write_allow() -> Optional[List[str]]:
+    """The configured write allowlist, or None when there is none.
+
+    Read at call time and never cached at import: the server is a long-lived
+    process, and the tests set the variable per case.
+
+    Three states: unset -> None (unrestricted); set -> the colon-separated
+    prefixes; empty (or all-separators) -> [] (read-only, no write tool can
+    name a path).
+    """
+    raw = os.environ.get(_WRITE_ALLOW_ENV)
+    if raw is None:
+        return None
+    return [p.strip().lstrip("/") for p in raw.split(":") if p.strip()]
+
+
+def _write_denied(vault: Path, target: Path) -> Optional[Dict[str, Any]]:
+    """An error dict when `target` is outside the write allowlist, else None.
+
+    `target` has already been through `_resolve_in_vault`, so traversal is
+    refused before this runs and `relative_to` cannot raise - which is also
+    why a bogus prefix (`..`, `/`) in the list can never widen anything: the
+    comparison is between two paths that are both already inside the vault.
+
+    A prefix matches a whole path component, not a string prefix: `Inbox`
+    allows `Inbox/x.md` and `Inbox/sub/x.md`, and never `Inboxes/x.md`.
+    """
+    allow = _write_allow()
+    if allow is None:
+        return None
+    rel = target.relative_to(vault).as_posix()
+    for prefix in allow:
+        p = prefix.rstrip("/")
+        if not p or rel == p or rel.startswith(p + "/"):
+            return None
+    named = ", ".join(allow) if allow else "(none: this connection is read-only)"
+    return {"error": f"this connection may only write under: {named}; "
+                     f"{rel} is outside that scope"}
+
+
 # Operational logs and immutable raw sources are rarely the *answer* to a query:
 # they are long and term-dense, so without a penalty they dominate term-frequency
 # ranking and bury short canonical notes (measured: 0% recall@10 before this - see
@@ -916,6 +965,10 @@ def save_note(
         inbox = vault / _NOTES_DIR
         target = inbox / f"{date} - {_slug(title)}.md"
 
+    denied = _write_denied(vault, target)
+    if denied is not None:
+        return denied
+
     tag_block = "\n".join(f"  - {t}" for t in tags)
     try:
         note_body = _prepare_note_content(content, summary)
@@ -986,6 +1039,9 @@ def update_note(
         return {"error": "path is outside the vault"}
     if {p.lower() for p in target.relative_to(vault).parts} & _PROTECTED_WRITE_DIRS:
         return {"error": "path is in a protected directory"}
+    denied = _write_denied(vault, target)
+    if denied is not None:
+        return denied
     text = _read_safe(target)
     if text is None:
         return {"error": f"not found: {rel} (update_note only edits existing notes)"}
@@ -1038,6 +1094,9 @@ def replace_text(rel: str, old_text: str, new_text: str) -> Dict[str, Any]:
         return {"error": "path is outside the vault"}
     if {p.lower() for p in target.relative_to(vault).parts} & _PROTECTED_WRITE_DIRS:
         return {"error": "path is in a protected directory"}
+    denied = _write_denied(vault, target)
+    if denied is not None:
+        return denied
     text = _read_safe(target)
     if text is None:
         return {"error": f"not found: {rel}"}
@@ -1062,6 +1121,9 @@ def move_note(source: str, destination: str) -> Dict[str, Any]:
     for target in (src, dst):
         if {p.lower() for p in target.relative_to(vault).parts} & _PROTECTED_WRITE_DIRS:
             return {"error": "source or destination is in a protected directory"}
+        denied = _write_denied(vault, target)
+        if denied is not None:
+            return denied
     if not src.is_file():
         return {"error": f"not found: {source}"}
     if dst.exists():
