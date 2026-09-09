@@ -53,13 +53,19 @@ mcp = FastMCP("obsidian-second-brain")
 
 
 @mcp.tool()
-def obsidian_search(query: str, limit: int = 6) -> str:
+def obsidian_search(query: str, limit: int = 6, folders: list[str] | None = None) -> str:
     """Search the Obsidian vault for relevant notes.
 
     Returns ranked matches with a snippet and the vault-relative path of each
     note (pass that path to obsidian_read_note to read the whole note).
+
+    `folders` optionally restricts the search to vault-relative folder
+    prefixes, e.g. ["Specs/", "Decisions/"]. It only ever narrows: if this
+    connection has a read fence (OBSIDIAN_MCP_READ_ALLOW), the search covers
+    the intersection of the two, and naming a fenced folder returns nothing
+    rather than widening the scope.
     """
-    return json.dumps({"results": vault_ops.search(query, limit=limit)})
+    return json.dumps({"results": vault_ops.search(query, limit=limit, folders=folders)})
 
 
 @mcp.tool()

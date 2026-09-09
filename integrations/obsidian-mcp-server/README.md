@@ -50,6 +50,48 @@ Every successful write (`save_note`, `capture`, `update_note`, `replace_text`, `
 
 Each part has its own key so `saved` alone never implies the others happened. Writes to `Logs/`, `log.md` and `index.md` themselves are never logged (no loops). `OBSIDIAN_BOOKKEEPING=0` switches validation, index and log off; the post-write command is independent of that switch.
 
+## Scoping a mounted connection: two fences
+
+A client cannot disable individual tools on a server it mounts, so a profile that should only touch part of the vault has to be scoped here. Two independent env vars do that, one per direction. Both take **colon-separated, vault-relative folder prefixes**, both match a **whole path component, case-sensitively** (`Knowledge` covers `Knowledge/x.md` and `Knowledge/sub/x.md`, never `Knowledgebase/x.md` or `knowledge/x.md`), and in both an entry that is only slashes is dropped rather than treated as "everything".
+
+### Write fence
+
+`OBSIDIAN_MCP_WRITE_ALLOW` names the folders this connection may write (agent-ops decision row 93). It gates every write tool: `save_note`, `capture`, `update_note`, `replace_text`, `move_note`.
+
+- **unset** - unrestricted, what Claude Desktop / Claude Code / Cursor see
+- **set** - e.g. `OBSIDIAN_MCP_WRITE_ALLOW="Inbox/:Knowledge/"`
+- **empty** - read-only: no write tool can name a path
+
+A refused write returns an error naming the allowed prefixes and changes nothing on disk.
+
+### Read fence
+
+`OBSIDIAN_MCP_READ_ALLOW` names the folders this connection may **read** (Capsule Corp decision row 125). Same syntax, same matching rules, applied to every read path the server exposes:
+
+| Tool | Function | How the fence applies |
+|---|---|---|
+| `obsidian_search` | `search` (+ `_semantic_fuse`) | out-of-scope notes are dropped **in the walk**, before the scan cap and before `limit`, and the semantic arm filters the embedding index before its fusion slice - so a fenced note never occupies a result slot and its existence cannot be inferred from result counts |
+| `obsidian_read_note` | `read_note` | a clear error naming the readable scope, never an empty string or a bare not-found; checked on the *resolved* path, so `Knowledge/../Decisions/x.md` is fenced by where it lands |
+| `obsidian_backlinks` | `backlinks` | only readable notes are reported as referrers |
+| `obsidian_vault_health` | `vault_health` (via `_stem_index`) | counts and samples cover readable notes only |
+| `obsidian_validate_note` | `validate_note` | fenced: its issue list reports frontmatter keys and every unresolved wikilink, which is note content by proxy |
+
+The single choke point is `_iter_notes`, which every scanning read path goes through; it takes an `allow=` prefix filter and applies the env fence on top of it.
+
+- **unset or empty-valued-and-absent** - **allow everything, i.e. exactly today's behaviour.** Nothing changes for any deployed client until a profile sets the variable.
+- **set** - e.g. `OBSIDIAN_MCP_READ_ALLOW="Specs/:Decisions/"`
+- **empty** (`OBSIDIAN_MCP_READ_ALLOW=""`) - this connection may read no notes (the mirror image of an empty write fence, which is a read-only connection)
+
+The two fences are independent and compose: a read fence never restricts writes and a write fence never restricts reads, so `READ_ALLOW="Decisions/"` with `WRITE_ALLOW="Knowledge/"` is a role that reads decisions and files its output elsewhere.
+
+Not covered, deliberately: `obsidian_list_skills` / `obsidian_get_skill` read command playbooks from the repo (`OBSIDIAN_COMMANDS_DIR`), not vault notes. Neither fence is a substitute for filesystem permissions either - a client that also has direct file tools on the vault path can read around both.
+
+**The per-role folder sets are not defined here.** Which folders each Hermes profile (`dev`, `reviewer`, `qa`, `lead`, `researcher`, ...) may read is decided in Capsule Corp's C4 tick table; this repo ships the mechanism and its allow-all default only.
+
+### Companion: the `folders` parameter on search
+
+`obsidian_search(query, limit, folders=["Specs/", "Decisions/"])` restricts one call to those prefixes, using the same prefix syntax. It only ever **narrows**: the effective scope is the intersection of `folders` with the read fence, so naming a fenced folder returns nothing rather than widening anything. `folders=None` (the default) means the fence alone decides; an explicit empty list, or a list of only degenerate entries, names no folder and returns nothing - an explicit narrowing is never silently read as "no filter".
+
 ## Run it
 
 Requires the vault path in the environment and the `mcp` package:
