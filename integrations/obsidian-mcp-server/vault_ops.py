@@ -557,20 +557,70 @@ def _load_index_cached(index_path: Path) -> dict:
     return _INDEX_CACHE["index"]
 
 
+def _index_ineligible(rel: str, policy: Optional[Dict[str, Any]]) -> bool:
+    """Does the index's own stored policy say `rel` is deliberately not indexed?
+
+    The builder (`scripts/eval/semantic_search.py`) excludes plugin scaffolding,
+    generated folders and duplicated documentation mirrors from the index on
+    purpose - a note it never meant to hold is not missing coverage. It writes
+    the rules it applied into the index file under `policy`, and this is the
+    generic matcher for them. No policy in the index (an older build) means the
+    old behavior: every scanned note counts.
+    """
+    if not policy:
+        return False
+    low = rel.lower()
+    for pref in policy.get("allow_path_prefixes") or ():
+        p = str(pref).lower()
+        if low == p or low.startswith(p.rstrip("/") + "/"):
+            return False
+    deny_dirs = {str(d).lower() for d in (policy.get("deny_dir_names") or ())}
+    parts = low.split("/")
+    for pt in parts[:-1]:
+        if pt in deny_dirs or pt.endswith("templates"):
+            return True
+    if any(low.startswith(str(p).lower()) for p in (policy.get("deny_path_prefixes") or ())):
+        return True
+    for pat in policy.get("deny_path_patterns") or ():
+        try:
+            if re.search(str(pat), rel, re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    if any(low.endswith(str(s).lower()) for s in (policy.get("deny_name_suffixes") or ())):
+        return True
+    for pref in policy.get("deny_env_prefixes") or ():
+        p = str(pref).lower()
+        if low == p or low.startswith(p):
+            return True
+    return False
+
+
 def index_coverage(vault: Path) -> Dict[str, Any]:
     """How much of the vault the semantic index actually covers.
 
     Shared by search (which warns) and vault_health (which reports), so the two
     can never disagree about whether an index is current.
+
+    `scanned` counts only notes the index is MEANT to hold: the builder skips
+    plugin scaffolding, generated folders and duplicated doc mirrors by design,
+    and counting those as missing turned a healthy index into a permanent
+    76%-missing warning on a vault that is three quarters documentation mirror.
+    `excluded` reports how many were set aside so the number stays explainable.
     """
     index_path = vault / _SEMANTIC_INDEX_FILE
     if not index_path.exists():
-        return {"index": False, "scanned": 0, "indexed": 0, "missing": 0, "pct_missing": 0.0}
+        return {"index": False, "scanned": 0, "indexed": 0, "missing": 0, "pct_missing": 0.0,
+                "excluded": 0}
     try:
-        notes = (_load_index_cached(index_path).get("notes") or {})
+        index = _load_index_cached(index_path)
+        notes = index.get("notes") or {}
     except Exception:
-        return {"index": False, "scanned": 0, "indexed": 0, "missing": 0, "pct_missing": 0.0}
-    scanned = {md.relative_to(vault).as_posix() for md in _iter_notes(vault)}
+        return {"index": False, "scanned": 0, "indexed": 0, "missing": 0, "pct_missing": 0.0,
+                "excluded": 0}
+    policy = index.get("policy")
+    walked = [md.relative_to(vault).as_posix() for md in _iter_notes(vault)]
+    scanned = {rel for rel in walked if not _index_ineligible(rel, policy)}
     missing = len(scanned - set(notes))
     return {
         "index": True,
@@ -578,6 +628,7 @@ def index_coverage(vault: Path) -> Dict[str, Any]:
         "indexed": len(notes),
         "missing": missing,
         "pct_missing": (100.0 * missing / len(scanned)) if scanned else 0.0,
+        "excluded": len(walked) - len(scanned),
     }
 
 
@@ -592,6 +643,12 @@ def _warn_if_index_stale(vault: Path, scanned: List[str], notes: Dict[str, Any])
     if _STALE_WARNED_FOR == key or not scanned:
         return
     _STALE_WARNED_FOR = key
+    # Same correction as index_coverage: a note the builder excludes on purpose
+    # is not missing coverage, and counting it made the warning permanent.
+    policy = (_INDEX_CACHE.get("index") or {}).get("policy")
+    scanned = [rel for rel in scanned if not _index_ineligible(rel, policy)]
+    if not scanned:
+        return
     missing = len(set(scanned) - set(notes))
     pct = 100.0 * missing / len(scanned)
     if pct < _INDEX_STALE_WARN_PCT:

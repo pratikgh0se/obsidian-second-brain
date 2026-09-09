@@ -52,6 +52,11 @@ EMBED_KEY = os.environ.get("OBSIDIAN_EMBED_KEY", "")
 EXCLUDE_PREFIXES = tuple(
     p.strip() for p in os.environ.get("OBSIDIAN_EMBED_EXCLUDE", "").split(",") if p.strip()
 )
+# Per-vault escape hatch: prefixes here are indexed even if INDEX_POLICY denies
+# them (comma-separated, vault-relative), e.g. "Architecture/skills/claude-code".
+ALLOW_PREFIXES_ENV = tuple(
+    p.strip() for p in os.environ.get("OBSIDIAN_EMBED_ALLOW", "").split(",") if p.strip()
+)
 # Single source of truth: the MCP server owns the skip set, so the semantic
 # index and the lexical scan can never drift into different universes
 # (stress-test fix 10/24).
@@ -61,11 +66,91 @@ _sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "integrations" / "
 from vault_ops import _SKIP_DIRS as SKIP_DIRS  # noqa: E402
 
 INDEX_FILE = ".obsidian-semantic-index.json"  # written at vault root
-# Embedding models have a token limit (typically ~512 tokens). Long notes
-# must be split into safe chunks and averaged, or the model 500s. ~1200 chars sits
-# well under the limit; capping the chunk count bounds time on huge notes.
-_CHUNK_CHARS = 1200
-_MAX_CHUNKS = 8
+
+# --------------------------------------------------------------------------- #
+# Chunk geometry - sized to the MODEL'S window, not to a guess
+# --------------------------------------------------------------------------- #
+# `bge-m3` (the default and the model named in every index built so far) accepts
+# inputs "from short sentences to long documents of up to 8,192 tokens"
+# (M3-Embedding, arXiv:2402.03216, 2024-02-05, rev. 2025-12-12). The previous
+# geometry here - 1,200 chars x 8 chunks - was sized for a "typically ~512 token"
+# model and therefore embedded at most 9,600 characters of any note. Measured on
+# ~/second-brain on 2026-09-09 that silently discarded 45% of all vault text:
+# 464 of 950 notes exceeded the cap, and everything past it could never be
+# retrieved semantically, at any rank, by any query.
+#
+# The fix has two halves. The chunk grows to ~1,500-1,700 tokens - big enough to
+# hold a whole `##` section, small enough that max-over-chunks scoring stays
+# precise (a note is as relevant as its most relevant section) and far enough
+# under 8,192 that a token-dense table still fits. And the count cap stops being
+# the note's size limit: it is now a SAFETY CEILING only.
+_MODEL_WINDOW_TOKENS = 8192          # bge-m3's real input window - see above
+_CHUNK_CHARS = 6000                  # ~1,500-1,700 tokens at ~3.5-4 chars/token
+_CHUNK_OVERLAP_CHARS = 500           # a fact on a boundary lands in both chunks
+# Safety ceiling, NOT the working limit: 64 x 6,000 = 384,000 chars ~ 60,000
+# words, which covers the largest note in the vault (19,649 words, ~130k chars,
+# ~22 chunks) with 3x headroom. A note that hits 64 is pathological and gets
+# named on stderr instead of being silently truncated.
+_MAX_CHUNKS = 64
+# Never subdivide below this: past it, chunks carry no context worth embedding.
+_MIN_CHUNK_CHARS = 200
+
+# --------------------------------------------------------------------------- #
+# What gets indexed - ONE config constant (agent-ops decision row 120)
+# --------------------------------------------------------------------------- #
+# Excluding is as valuable as including: on 2026-09-09 the index held 107 notes,
+# 17 of them from `copilot/` - scaffolding the vault's `_CLAUDE.md` forbids every
+# agent and job from even scanning - while three quarters of the vault is a
+# duplicated skill mirror that puts ten identical candidates in front of every
+# query. The ignore rules existed in `report.sh`'s counts and in the eval's
+# exclusions but were never enforced in the index builder. They are here now,
+# in one place, so the three lists cannot drift apart again.
+#
+# Evaluation order per note (vault-relative POSIX path):
+#   1. allow_path_prefixes  - an explicit allow wins over every deny below
+#   2. deny_dir_names       - directory name at ANY depth (machine-owned dirs)
+#   3. deny_path_prefixes   - root-anchored folder (the vault's folder map)
+#   4. deny_path_patterns   - regex, for shapes a prefix cannot express
+#   5. deny_name_suffixes   - filename suffix
+# All string comparisons are case-insensitive. This layers ON TOP of
+# `vault_ops._SKIP_DIRS`, the canonical skip set shared with the lexical scan.
+INDEX_POLICY: dict[str, tuple | set] = {
+    # Escape hatch: index this prefix even if a rule below denies it. Empty by
+    # default; `OBSIDIAN_EMBED_ALLOW` extends it.
+    "allow_path_prefixes": (),
+    # Machine-owned directories, skipped wherever they appear. `.obsidian`,
+    # `.git`, `_trash`, `templates`, `node_modules`, `__pycache__` and friends
+    # arrive from `_SKIP_DIRS`; these are the ones the vault's folder map names
+    # that the shared set does not carry.
+    "deny_dir_names": {
+        "copilot",       # _CLAUDE.md: "plugin scaffolding... NOT knowledge"
+        ".smart-env",    # Smart Connections plugin index
+        ".claude-runs",  # scheduled-job scratch
+        "_archive",      # superseded notes, kept for history only
+    },
+    # Root-anchored folders from the vault's folder map. Prefixes, not names, so
+    # a user's own `Boards/` elsewhere in a different vault is untouched.
+    "deny_path_prefixes": (
+        "ledger/",              # machine-written milestone JSONL log
+        "boards/",              # GENERATED from the kanban every 10 minutes
+        "architecture/skills/",  # the skill mirror - see the pattern below
+    ),
+    # THE SKILL-MIRROR PATTERN, documented because it is the single biggest win
+    # available: the skill mirror reproduces the DEPLOYED LAYOUT rather than the
+    # content, so 72 unique upstream docs exist once per role directory -
+    # `Architecture/skills/<tool>/<role>/<doc>.md`, ten role dirs, 719 files,
+    # 76% of the vault's notes and 64% of its words, every copy identical and
+    # every copy a candidate in every search. The pattern is
+    # `**/skills/<tool>/<role>/<doc>.md`: a `skills/` directory with a note
+    # exactly two levels below it. The `architecture/skills/` prefix above
+    # catches the mirror where it lives today; this pattern catches it if it is
+    # ever mounted somewhere else.
+    "deny_path_patterns": (
+        r"(?:^|/)skills/[^/]+/[^/]+/[^/]+\.md$",
+    ),
+    # Drawings are raw JSON, not prose: they bloat the index and fail embedding.
+    "deny_name_suffixes": (".excalidraw.md",),
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -195,6 +280,82 @@ def embed_note(text: str) -> list[float]:
     return _mean_pool(vecs) if vecs else []
 
 
+# --------------------------------------------------------------------------- #
+# Structure-aware chunking
+# --------------------------------------------------------------------------- #
+# Separator ladder, widest structural boundary first. `text[i:i+1200]` used to
+# split mid-sentence and mid-table; a note's own headings are free signal, so
+# split on them first and only fall back to paragraphs, lines and words.
+_SEPARATORS = ("\n# ", "\n## ", "\n### ", "\n#### ", "\n##### ", "\n\n", "\n", " ")
+
+
+def _split_keeping(text: str, sep: str) -> list[str]:
+    """Split on `sep`, re-attaching it to the front of every piece but the first.
+
+    Keeping the separator means the heading stays glued to the section it
+    introduces, so a chunk always says which section it came from.
+    """
+    parts = text.split(sep)
+    if len(parts) == 1:
+        return [text]
+    return [parts[0]] + [sep + p for p in parts[1:]]
+
+
+def _split_units(text: str, limit: int) -> list[str]:
+    """Break `text` into units of at most `limit` chars on structure boundaries.
+
+    Recursive descent down _SEPARATORS: a unit already short enough is returned
+    whole; otherwise it is split on the widest separator that actually divides
+    it and each piece re-examined. Content with no usable separator (a single
+    enormous table row) is hard-sliced as a last resort - never dropped.
+    """
+    if len(text) <= limit:
+        return [text] if text.strip() else []
+    for sep in _SEPARATORS:
+        # `text[1:]`: a separator at position 0 does not divide anything.
+        if sep in text[1:]:
+            pieces = _split_keeping(text, sep)
+            if len(pieces) > 1:
+                out: list[str] = []
+                for p in pieces:
+                    out.extend(_split_units(p, limit))
+                return out
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
+
+
+def chunk_note_text(text: str, header: str = "") -> list[str]:
+    """Split a note body into overlapping, structure-aligned chunks.
+
+    Every character of `text` appears in at least one chunk - the whole point of
+    the change: nothing is silently truncated any more. Overlap means some
+    characters appear in two, which is deliberate (a fact that straddles a
+    section boundary must be retrievable from either side).
+
+    Each chunk is at most `_CHUNK_CHARS - len(header)` characters, so
+    header + chunk still fits comfortably inside the model's window.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    room = max(_MIN_CHUNK_CHARS, _CHUNK_CHARS - len(header))
+    overlap = min(_CHUNK_OVERLAP_CHARS, room // 4)
+    # Pack to (room - overlap) so the prepended tail cannot push a chunk over.
+    pack_limit = max(_MIN_CHUNK_CHARS, room - overlap)
+    units = _split_units(text, pack_limit)
+
+    chunks: list[str] = []
+    cur = ""
+    for u in units:
+        if cur and len(cur) + len(u) > pack_limit:
+            chunks.append(cur)
+            cur = (cur[-overlap:] if overlap else "") + u
+        else:
+            cur += u
+    if cur.strip():
+        chunks.append(cur)
+    return chunks
+
+
 def embed_note_chunks(text: str, header: str = "") -> list[list[float]]:
     """Embed a note as per-chunk vectors (stress-test fix 13/24).
 
@@ -204,11 +365,17 @@ def embed_note_chunks(text: str, header: str = "") -> list[list[float]]:
     query time (best chunk wins), so each chunk carries the note's identity
     header (title/type/aliases/related) - a mid-dossier section must still know
     who it is about."""
-    text = text.strip()
-    if not text:
-        return []
-    body_room = max(200, _CHUNK_CHARS - len(header))
-    chunks = [text[i:i + body_room] for i in range(0, len(text), body_room)][:_MAX_CHUNKS]
+    chunks = chunk_note_text(text, header=header)
+    if len(chunks) > _MAX_CHUNKS:
+        # The ceiling is a bug alarm, not a size policy. Say so, by name, on
+        # stderr: silent truncation is what this whole change exists to kill.
+        print(
+            f"  [WARNING] {len(chunks)} chunks exceeds the _MAX_CHUNKS={_MAX_CHUNKS} "
+            f"safety ceiling ({len(text)} chars); indexing the first {_MAX_CHUNKS} "
+            f"only. Split this note.",
+            file=sys.stderr,
+        )
+        chunks = chunks[:_MAX_CHUNKS]
     vecs: list[list[float]] = []
     for c in chunks:
         vecs.extend(_embed_adaptive(c, header))
@@ -258,21 +425,124 @@ def _excluded(rel: str) -> bool:
     return any(rel == p or rel.startswith(p) for p in EXCLUDE_PREFIXES)
 
 
+_MIRROR_RES = tuple(re.compile(p, re.IGNORECASE) for p in INDEX_POLICY["deny_path_patterns"])
+
+
+def chunker_fingerprint() -> str:
+    """Identify the chunk geometry, so a change to it invalidates the cache.
+
+    Vectors are only comparable to each other if they were produced from the
+    same text. Change the chunk size, the overlap or the ceiling and every
+    cached vector describes a different slice of its note - which is why this
+    joins `format` and `model` in the cache-validity check.
+    """
+    return f"c{_CHUNK_CHARS}-o{_CHUNK_OVERLAP_CHARS}-m{_MAX_CHUNKS}"
+
+
+def policy_payload() -> dict:
+    """The effective policy as plain JSON, to be stored in the index file.
+
+    Read by `vault_ops.index_coverage` so the coverage report counts only the
+    notes the index is actually meant to hold. Sets become sorted lists so the
+    payload is stable and diffable.
+    """
+    return {
+        "allow_path_prefixes": sorted(
+            tuple(INDEX_POLICY["allow_path_prefixes"]) + ALLOW_PREFIXES_ENV
+        ),
+        "deny_dir_names": sorted(set(INDEX_POLICY["deny_dir_names"]) | set(SKIP_DIRS)),
+        "deny_path_prefixes": sorted(INDEX_POLICY["deny_path_prefixes"]),
+        "deny_path_patterns": sorted(INDEX_POLICY["deny_path_patterns"]),
+        "deny_name_suffixes": sorted(INDEX_POLICY["deny_name_suffixes"]),
+        "deny_env_prefixes": sorted(EXCLUDE_PREFIXES),
+    }
+
+
+def policy_verdict(rel: str) -> str | None:
+    """Why `rel` is not indexed, or None if it is. `rel` is vault-relative POSIX.
+
+    Returns a short reason string (used verbatim in the build report and by the
+    tests) so an exclusion is always explainable rather than mysterious.
+    """
+    low = rel.lower()
+    for pref in tuple(INDEX_POLICY["allow_path_prefixes"]) + ALLOW_PREFIXES_ENV:
+        if low.startswith(pref.lower().rstrip("/") + "/") or low == pref.lower():
+            return None
+    parts = low.split("/")
+    for pt in parts[:-1]:
+        if pt in INDEX_POLICY["deny_dir_names"]:
+            return f"denied dir: {pt}/"
+        if pt in SKIP_DIRS or pt.endswith("templates"):
+            return f"skip dir: {pt}/"
+    for pref in INDEX_POLICY["deny_path_prefixes"]:
+        if low.startswith(pref):
+            return f"denied prefix: {pref}"
+    for rx in _MIRROR_RES:
+        if rx.search(rel):
+            return "skill mirror (**/skills/<tool>/<role>/<doc>.md)"
+    for suf in INDEX_POLICY["deny_name_suffixes"]:
+        if low.endswith(suf):
+            return f"denied suffix: {suf}"
+    if _excluded(rel):
+        return "OBSIDIAN_EMBED_EXCLUDE"
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Index build / load (cached, incremental)
 # --------------------------------------------------------------------------- #
 def _iter_notes(vault: Path):
+    """Yield every note the index policy allows. Excluded notes never even get
+    read, so a forbidden folder costs nothing and cannot leak into a vector."""
     for md in sorted(vault.rglob("*.md")):
-        parts = md.relative_to(vault).parts
-        if any(pt.lower() in SKIP_DIRS or pt.lower().endswith("templates") for pt in parts):
-            continue
-        if md.name.endswith(".excalidraw.md"):
-            continue  # drawings are raw JSON, not prose - they bloat and fail embedding
-        yield md
+        if policy_verdict(md.relative_to(vault).as_posix()) is None:
+            yield md
 
 
-def build_index(vault: Path, verbose: bool = True) -> dict:
-    """Embed every (non-excluded) note, reusing cached vectors for unchanged notes."""
+def _iter_all_notes(vault: Path):
+    """Yield (path, verdict) for every note, indexed or not - for --stats."""
+    for md in sorted(vault.rglob("*.md")):
+        yield md, policy_verdict(md.relative_to(vault).as_posix())
+
+
+# How many newly-embedded notes to accumulate before flushing the index to
+# disk. The old builder wrote once at the end, so a run killed by the nightly
+# job's wall-clock cap wrote NOTHING - 600+ notes embedded on 2026-09-08 and
+# zero kept. Flushing every batch turns a killed run into a resumable one:
+# whatever was embedded is on disk and the next run reuses it by hash.
+_BATCH_WRITE = 25
+
+
+def _atomic_write_index(index_path: Path, payload: dict) -> None:
+    """Write the index via temp file + rename, so it is never half-written.
+
+    A reader (search, vault_health, the MCP server) either sees the previous
+    complete index or the new complete one - never a truncated JSON file. The
+    temp file is created in the SAME directory so the rename is atomic.
+    """
+    tmp = index_path.with_name(index_path.name + f".tmp{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(index_path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def build_index(vault: Path, verbose: bool = True, batch: int = _BATCH_WRITE) -> dict:
+    """Embed every eligible note, reusing cached vectors for unchanged notes.
+
+    Incremental by content hash: a note whose sha1 matches the cached entry is
+    not re-embedded. Notes deleted from the vault are dropped from the index on
+    a completed run. Progress is flushed atomically every `batch` newly-embedded
+    notes; those interim flushes carry the union of old and new entries (a
+    deletion is only provable once the walk finishes, so a killed run keeps
+    stale entries rather than losing good ones - the next full run prunes them).
+    """
+    started = time.time()
     index_path = vault / INDEX_FILE
     cache: dict = {}
     if index_path.exists():
@@ -285,17 +555,50 @@ def build_index(vault: Path, verbose: bool = True) -> dict:
     # embed for it is not. Same rule for a MODEL switch (fix 16/24): vectors
     # from different embedding models live in different spaces - mixing them
     # silently would make every similarity meaningless.
-    cache_ok = cache.get("format") == 2 and cache.get("model") == EMBED_MODEL
+    # ...and the same rule for the CHUNKER. A note's text can be unchanged while
+    # what we embed for it changes: the pre-2026-09-09 geometry (1,200 chars x 8)
+    # embedded at most 9,600 characters of a note, so its cached vectors are
+    # truncated. Hash-matching them would keep 45% of the vault unretrievable
+    # forever while every counter reported a healthy cached hit. The geometry is
+    # fingerprinted into the index and a change invalidates the whole cache.
+    cache_ok = (
+        cache.get("format") == 2
+        and cache.get("model") == EMBED_MODEL
+        and cache.get("chunker") == chunker_fingerprint()
+    )
     old = cache.get("notes", {}) if cache_ok else {}
     new: dict = {}
     embedded = reused = skipped = failed = degraded = 0
     degraded_paths: list[str] = []
     dropped_paths: list[str] = []
+    skipped_reasons: dict[str, int] = {}
 
-    for md in _iter_notes(vault):
+    def _flush(final: bool = False) -> dict:
+        """Persist progress. Interim flushes keep entries not yet revisited; the
+        final flush is authoritative and prunes notes deleted from the vault."""
+        notes = new if final else {**old, **new}
+        payload = {
+            "model": EMBED_MODEL,
+            "format": 2,
+            "chunker": chunker_fingerprint(),
+            "built": int(time.time()) if final else cache.get("built", int(started)),
+            # The policy travels WITH the index, as data. The MCP server must
+            # ship standalone and cannot import from scripts/, but it has to
+            # know which notes the index deliberately omits or it reports every
+            # excluded note as missing coverage and warns forever. Carrying the
+            # rules here keeps one authoring site (INDEX_POLICY) and no second
+            # copy of the list to drift.
+            "policy": policy_payload(),
+            "notes": notes,
+        }
+        _atomic_write_index(index_path, payload)
+        return payload
+
+    for md, verdict in _iter_all_notes(vault):
         rel = md.relative_to(vault).as_posix()
-        if _excluded(rel):
+        if verdict is not None:
             skipped += 1
+            skipped_reasons[verdict] = skipped_reasons.get(verdict, 0) + 1
             continue
         try:
             text = md.read_text(encoding="utf-8", errors="ignore")
@@ -331,7 +634,9 @@ def build_index(vault: Path, verbose: bool = True) -> dict:
                     print(f"  [skip] {rel}: {e}", file=sys.stderr)
                 continue
         tm = _FM_TYPE_RE.search(text[:400])
-        entry = {"hash": h, "title": md.stem, "vecs": vecs}
+        # `at` is the embedding timestamp: --stats reports the oldest one, which
+        # is how "the index is four days stale" becomes visible without guessing.
+        entry = {"hash": h, "title": md.stem, "vecs": vecs, "at": int(time.time())}
         if tm:
             entry["type"] = tm.group(1).lower()
         if degraded_note:
@@ -340,26 +645,146 @@ def build_index(vault: Path, verbose: bool = True) -> dict:
             degraded_paths.append(rel)
         new[rel] = entry
         embedded += 1
-        if verbose and embedded % 50 == 0:
-            print(f"  embedded {embedded} notes...", file=sys.stderr)
+        if batch > 0 and embedded % batch == 0:
+            _flush()
+            if verbose:
+                print(f"  embedded {embedded} notes (progress saved)...", file=sys.stderr)
 
-    out = {"model": EMBED_MODEL, "format": 2, "notes": new}
-    index_path.write_text(json.dumps(out), encoding="utf-8")
+    removed = [rel for rel in old if rel not in new]
+    out = _flush(final=True)
+    elapsed = time.time() - started
     if verbose:
         total_eligible = len(new) + failed
         pct = (100.0 * len(new) / total_eligible) if total_eligible else 100.0
         print(
             f"[semantic] indexed {len(new)} notes ({embedded} new, {reused} cached, "
-            f"{skipped} excluded, {degraded} degraded, {failed} dropped) -> {index_path}",
+            f"{skipped} excluded, {degraded} degraded, {failed} dropped, "
+            f"{len(removed)} removed) -> {index_path}",
             file=sys.stderr,
         )
         print(f"[semantic] coverage: {len(new)}/{total_eligible} ({pct:.1f}%)", file=sys.stderr)
+        for reason, n in sorted(skipped_reasons.items(), key=lambda kv: -kv[1]):
+            print(f"  [excluded x{n}] {reason}", file=sys.stderr)
         # Gaps must be a report, not a surprise: name every degraded/dropped note.
         for rel in degraded_paths:
             print(f"  [degraded to identity-only] {rel}", file=sys.stderr)
         for rel in dropped_paths:
             print(f"  [DROPPED - not findable semantically] {rel}", file=sys.stderr)
+        for rel in removed:
+            print(f"  [removed from index - note deleted] {rel}", file=sys.stderr)
+        # The one line a job log or a status board can grep for.
+        print(
+            f"reindex: {len(new)} notes, {embedded} embedded, {skipped} skipped, "
+            f"{elapsed:.1f} s",
+            file=sys.stderr,
+        )
     return out
+
+
+def _percentile(values: list[int], p: float) -> int:
+    """Nearest-rank percentile on a sorted copy. No numpy in this repo."""
+    if not values:
+        return 0
+    s = sorted(values)
+    k = max(0, min(len(s) - 1, int(round(p * (len(s) - 1)))))
+    return s[k]
+
+
+def index_stats(vault: Path) -> dict:
+    """Index coverage, staleness and chunk distribution - no embedding backend
+    needed, so it works when Ollama is down and it is cheap enough for a job."""
+    index_path = vault / INDEX_FILE
+    index: dict = {}
+    if index_path.exists():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            index = {}
+    notes = index.get("notes", {}) or {}
+
+    eligible: list[str] = []
+    excluded: dict[str, int] = {}
+    stale = missing = 0
+    for md, verdict in _iter_all_notes(vault):
+        rel = md.relative_to(vault).as_posix()
+        if verdict is not None:
+            excluded[verdict] = excluded.get(verdict, 0) + 1
+            continue
+        eligible.append(rel)
+        entry = notes.get(rel)
+        if not entry:
+            missing += 1
+            continue
+        try:
+            if entry.get("hash") != _content_hash(md.read_text(encoding="utf-8", errors="ignore")):
+                stale += 1
+        except OSError:
+            pass
+
+    chunk_counts = [len(n.get("vecs") or ([n["vec"]] if n.get("vec") else [])) for n in notes.values()]
+    ats = [n["at"] for n in notes.values() if isinstance(n.get("at"), (int, float))]
+    orphans = [rel for rel in notes if rel not in set(eligible)]
+    return {
+        "index_path": str(index_path),
+        "exists": index_path.exists(),
+        "model": index.get("model"),
+        "format": index.get("format"),
+        "built": index.get("built"),
+        "notes_indexed": len(notes),
+        "notes_eligible": len(eligible),
+        "coverage_pct": round(100.0 * len(notes) / len(eligible), 1) if eligible else 0.0,
+        "never_indexed": missing,
+        "stale_hash": stale,
+        "orphan_entries": len(orphans),
+        "excluded": excluded,
+        "excluded_total": sum(excluded.values()),
+        "oldest_write": min(ats) if ats else None,
+        "newest_write": max(ats) if ats else None,
+        "undated_entries": len(notes) - len(ats),
+        "chunks_p50": _percentile(chunk_counts, 0.50),
+        "chunks_p90": _percentile(chunk_counts, 0.90),
+        "chunks_max": max(chunk_counts) if chunk_counts else 0,
+        "chunks_total": sum(chunk_counts),
+        "at_ceiling": sum(1 for c in chunk_counts if c >= _MAX_CHUNKS),
+    }
+
+
+def _fmt_age(ts: float | None) -> str:
+    if not ts:
+        return "unknown"
+    stamp = time.strftime("%Y-%m-%dT%H:%M", time.localtime(ts))
+    days = (time.time() - ts) / 86400.0
+    return f"{stamp} ({days:.1f} days ago)"
+
+
+def print_stats(vault: Path, as_json: bool = False) -> int:
+    s = index_stats(vault)
+    if as_json:
+        print(json.dumps(s, indent=2))
+        return 0 if s["exists"] else 1
+    if not s["exists"]:
+        print(f"[semantic] no index at {s['index_path']} - build it: --build", file=sys.stderr)
+        return 1
+    print(f"index          {s['index_path']}")
+    print(f"model/format   {s['model']} / {s['format']}")
+    print(f"coverage       {s['notes_indexed']} / {s['notes_eligible']} eligible "
+          f"({s['coverage_pct']}%)")
+    print(f"never indexed  {s['never_indexed']}")
+    print(f"stale (hash)   {s['stale_hash']}")
+    print(f"orphan entries {s['orphan_entries']} (indexed but no longer eligible)")
+    print(f"excluded       {s['excluded_total']} notes")
+    for reason, n in sorted(s["excluded"].items(), key=lambda kv: -kv[1]):
+        print(f"                 x{n:<5} {reason}")
+    print(f"oldest write   {_fmt_age(s['oldest_write'])}")
+    print(f"newest write   {_fmt_age(s['newest_write'])}")
+    if s["undated_entries"]:
+        print(f"               ({s['undated_entries']} entries predate timestamping)")
+    print(f"chunks/note    p50 {s['chunks_p50']}, p90 {s['chunks_p90']}, "
+          f"max {s['chunks_max']}, total {s['chunks_total']}")
+    if s["at_ceiling"]:
+        print(f"AT CEILING     {s['at_ceiling']} notes at _MAX_CHUNKS={_MAX_CHUNKS} "
+              f"- text may be truncated; split them")
+    return 0
 
 
 def load_index(vault: Path) -> dict:
@@ -426,12 +851,23 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--build", action="store_true", help="Build/refresh the embedding index")
     ap.add_argument("--query", help="Run a semantic search and print the top matches")
     ap.add_argument("--limit", type=int, default=10)
+    ap.add_argument("--stats", action="store_true",
+                    help="Print index coverage, staleness and chunk distribution "
+                         "(needs no embedding backend)")
+    ap.add_argument("--json", action="store_true", help="With --stats: machine-readable output")
+    ap.add_argument("--batch", type=int, default=_BATCH_WRITE,
+                    help=f"With --build: flush the index every N embedded notes "
+                         f"(default {_BATCH_WRITE}; 0 disables interim flushes)")
     args = ap.parse_args(argv[1:])
 
     vault = Path(args.path).expanduser().resolve()
     if not vault.is_dir():
         print(f"vault path does not exist: {vault}", file=sys.stderr)
         return 2
+    # --stats reads the index and the vault only, so it must keep working when
+    # the backend is down: that is exactly when someone asks why search is bad.
+    if args.stats and not (args.build or args.query):
+        return print_stats(vault, as_json=args.json)
     if not ollama_available():
         print(
             f"Local model runtime not found at {OLLAMA_URL}.\n"
@@ -441,13 +877,15 @@ def main(argv: list[str]) -> int:
         return 3
 
     if args.build:
-        build_index(vault)
+        build_index(vault, batch=args.batch)
     if args.query:
         index = load_index(vault)
         for i, r in enumerate(semantic_search(args.query, index, args.limit), 1):
             print(f"{i:2}. {r['score']:.3f}  {r['path']}")
-    if not args.build and not args.query:
-        print("Nothing to do. Pass --build and/or --query.", file=sys.stderr)
+    if args.stats:
+        print_stats(vault, as_json=args.json)
+    if not (args.build or args.query or args.stats):
+        print("Nothing to do. Pass --build, --query and/or --stats.", file=sys.stderr)
     return 0
 
 

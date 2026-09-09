@@ -25,7 +25,13 @@ The semantic index is incremental. An existing, current index is cheap to refres
    ```
    Preserve the command's exit status and capture its stderr. If it exits nonzero, stop and show the actionable backend error. Do not claim the index was refreshed and do not report an after-state as success. The common failure is Ollama not running or the configured embedding model not being pulled; use the runtime and model named by the command's own output rather than assuming the defaults.
 
-4. On success, run the coverage command from step 2 again.
+   The builder flushes the index to disk every 25 newly embedded notes (temp file plus rename, so a reader never sees a half-written index). If the run is interrupted - a wall-clock cap, a laptop lid - the work already done is kept and re-running resumes from it rather than starting over. `--batch N` changes the flush interval; `--batch 0` disables interim flushes.
+
+4. On success, run the coverage command from step 2 again. For the fuller picture - coverage, how stale the oldest entry is, chunks per note at p50/p90, and how many notes each exclusion rule removed - use the builder's own stats mode, which needs no embedding backend and so still works when Ollama is down:
+   ```bash
+   uv run --directory "SKILL_ROOT" python scripts/eval/semantic_search.py --path "VAULT_PATH" --stats
+   ```
+   Add `--json` for a machine-readable form a scheduled job can parse.
 
 5. Report the result:
    - Coverage before and after as `indexed/scanned`, with missing count and percentage
