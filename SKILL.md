@@ -590,7 +590,9 @@ Steps:
 
 **Refreshes the semantic search index and makes its coverage visible.** Full steps in `commands/obsidian-reindex.md` (the source of truth).
 
-In short: reads the vault path from `_CLAUDE.md`, reports the current `index_coverage`, runs the existing incremental `semantic_search.py --build`, and reports coverage again with the builder's new, cached, excluded, degraded, and dropped counts. A backend failure stops the flow and is shown to the user; it is never presented as a successful refresh. The command updates only `.obsidian-semantic-index.json`, not Markdown notes.
+In short: reads the vault path from `_CLAUDE.md`, reports the current `index_coverage`, runs the existing incremental `semantic_search.py --build`, and reports coverage again with the builder's new, cached, excluded, degraded, dropped and removed counts. A backend failure stops the flow and is shown to the user; it is never presented as a successful refresh. The command updates only `.obsidian-semantic-index.json`, not Markdown notes.
+
+The build is incremental by content hash and saves progress every 25 embedded notes, so an interrupted run resumes rather than restarting. `semantic_search.py --path <vault> --stats` (add `--json`) reports coverage, staleness, chunks per note at p50/p90 and a per-rule breakdown of exclusions, and needs no embedding backend. Coverage counts only notes the index is meant to hold: the builder deliberately skips plugin scaffolding, generated folders and duplicated documentation mirrors, and it stores the rules it applied in the index file so `index_coverage` does not report them as missing.
 
 ---
 
