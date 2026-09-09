@@ -42,6 +42,28 @@ _SKIP_DIRS = {".obsidian", ".git", ".trash", "_trash", ".claude", "_export",
               "templates", "node_modules", ".agents", ".codex", ".gemini",
               ".opencode", "__pycache__"}
 
+# Lexical-arm-only exclusions (agent-ops decision row 124). The embed index
+# (`scripts/eval/semantic_search.py` INDEX_POLICY, agent-ops decision row 120)
+# denies plugin scaffolding and the skill-mirror duplicate content, but the
+# lexical scan below only ever consulted `_SKIP_DIRS`, so 802 mirror files and
+# all of `copilot/` stayed BM25 candidates in every search the MCP served while
+# the semantic index held a fraction of that. This is the minimal deny list
+# needed to bring the lexical arm's universe in line with the embed index's,
+# duplicated here (not imported) for the same standalone-module reason
+# `_SKIP_DIRS` is a literal. tests/test_exclude_policy.py asserts this set
+# agrees with `INDEX_POLICY` in semantic_search.py.
+#
+# Deliberately NOT included: `ledger/` and `boards/`, which INDEX_POLICY also
+# denies for the embed index. Those two stay lexically searchable on purpose -
+# `vault_health` and the board tools read them, and agent-ops decision row 124
+# scopes this change to the skill-mirror/copilot exclusion only.
+_LEXICAL_DENY_DIR_NAMES = {"copilot", ".smart-env", ".claude-runs", "_archive"}
+_LEXICAL_DENY_PATH_PREFIXES = ("architecture/skills/",)
+# THE SKILL-MIRROR PATTERN (see semantic_search.INDEX_POLICY for the full
+# rationale): a `skills/` directory with a note exactly two levels below it,
+# i.e. `**/skills/<tool>/<role>/<doc>.md`.
+_LEXICAL_MIRROR_RE = re.compile(r"(?:^|/)skills/[^/]+/[^/]+/[^/]+\.md$", re.IGNORECASE)
+
 # Directories no write tool may touch. `raw/` holds original sources the skill
 # treats as immutable, and `templates` needs to match the conventional capital-T
 # `Templates/` a bootstrapped vault actually creates - the old guard compared a
@@ -619,7 +641,10 @@ def index_coverage(vault: Path) -> Dict[str, Any]:
         return {"index": False, "scanned": 0, "indexed": 0, "missing": 0, "pct_missing": 0.0,
                 "excluded": 0}
     policy = index.get("policy")
-    walked = [md.relative_to(vault).as_posix() for md in _iter_notes(vault)]
+    # base_only=True: this needs the full pre-row-124 walk so notes the
+    # lexical arm now also excludes (copilot/, the skill mirror) still show up
+    # as "excluded" rather than silently vanishing from the accounting.
+    walked = [md.relative_to(vault).as_posix() for md in _iter_notes(vault, base_only=True)]
     scanned = {rel for rel in walked if not _index_ineligible(rel, policy)}
     missing = len(scanned - set(notes))
     return {
@@ -1457,15 +1482,38 @@ def get_skill(name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _iter_notes(vault: Path):
+def _iter_notes(vault: Path, *, base_only: bool = False):
     """Yield vault notes newest-first (modified time). Deterministic on purpose:
     every consumer of this iterator caps its scan, and a cap that bites must
-    drop the oldest notes, never a random filesystem-order slice."""
+    drop the oldest notes, never a random filesystem-order slice.
+
+    `base_only=True` applies only `_SKIP_DIRS` (the pre-row-124 universe),
+    skipping the lexical-only deny list below. `index_coverage` needs this:
+    it walks the vault to explain, note by note, why the semantic index
+    doesn't hold something (policy-excluded vs. actually missing), and that
+    accounting has to see everything the index policy might deny - including
+    copilot/ and the skill mirror - not the already-narrowed lexical universe,
+    or notes this function itself now excludes silently disappear from the
+    coverage report instead of being counted as "excluded"."""
     found = []
     for md in vault.rglob("*.md"):
-        parts = md.relative_to(vault).parts
+        rel = md.relative_to(vault)
+        parts = rel.parts
         if any(p.lower() in _SKIP_DIRS or p.lower().endswith("templates") for p in parts):
             continue
+        if not base_only:
+            # Lexical-only deny list (row 124): bring this arm's universe in
+            # line with the embed index's INDEX_POLICY (copilot/, .smart-env/,
+            # .claude-runs/, _archive/, the Architecture/skills/ mirror).
+            # Checked separately from _SKIP_DIRS above so the two lists stay
+            # independently readable and testable.
+            if any(p.lower() in _LEXICAL_DENY_DIR_NAMES for p in parts[:-1]):
+                continue
+            rel_low = rel.as_posix().lower()
+            if any(rel_low.startswith(pref) for pref in _LEXICAL_DENY_PATH_PREFIXES):
+                continue
+            if _LEXICAL_MIRROR_RE.search(rel.as_posix()):
+                continue
         # Drawings are JSON blobs in .md clothing; the semantic index skips them,
         # so the lexical scan does too - one universe for every mode.
         if md.name.endswith(".excalidraw.md"):
