@@ -98,15 +98,7 @@ def _write_allow() -> Optional[List[str]]:
     unrestricted: e.g. `"Inbox/:/"` allows only `Inbox/`, and `"/"` alone (or
     `"//"`, or any string of only `:` and `/`) allows nothing.
     """
-    raw = os.environ.get(_WRITE_ALLOW_ENV)
-    if raw is None:
-        return None
-    prefixes = []
-    for p in raw.split(":"):
-        cleaned = p.strip().lstrip("/")
-        if cleaned:
-            prefixes.append(cleaned)
-    return prefixes
+    return _norm_allow_prefixes(os.environ.get(_WRITE_ALLOW_ENV))
 
 
 def _write_denied(vault: Path, target: Path) -> Optional[Dict[str, Any]]:
@@ -138,6 +130,123 @@ def _write_denied(vault: Path, target: Path) -> Optional[Dict[str, Any]]:
             return None
     named = ", ".join(allow) if allow else "(none: this connection is read-only)"
     return {"error": f"this connection may only write under: {named}; "
+                     f"{rel} is outside that scope"}
+
+
+# Per-client READ fence (Capsule Corp decision row 125). The write fence above
+# scopes what a profile may change; this one scopes what it may see. Same
+# motivation, other direction: the Hermes worker profiles mount this server with
+# the full read surface, so a `reviewer` or `pentest` role that should read
+# nothing can today search and read every note in the vault, and a `dev` role
+# that should see `Specs/` can read `Decisions/`. The client cannot disable
+# single tools, so the scope switch lives here: one env var per profile naming
+# the vault-relative folder prefixes that profile may read.
+#
+# Syntax and parsing are deliberately IDENTICAL to the write fence
+# (colon-separated vault-relative prefixes, whole-component case-sensitive
+# matching, degenerate all-slash entries dropped), so a profile author learns
+# one format. The only semantic difference is what the empty state means:
+# `OBSIDIAN_MCP_WRITE_ALLOW=""` is a read-only connection, and
+# `OBSIDIAN_MCP_READ_ALLOW=""` is a write-only one - a role that reads nothing.
+#
+# UNSET OR ABSENT MEANS ALLOW EVERYTHING, i.e. exactly today's behaviour. No
+# deployed profile changes until a profile sets the variable; the per-role
+# folder sets themselves are decided in Capsule's C4 tick table, not here.
+_READ_ALLOW_ENV = "OBSIDIAN_MCP_READ_ALLOW"
+
+
+def _norm_allow_prefixes(raw: Optional[str]) -> Optional[List[str]]:
+    """Parse a colon-separated allowlist env value. None in -> None out.
+
+    Shared by both fences so their syntax cannot drift. An entry that is only
+    slashes (`/`, `//`) strips down to `""` and is DROPPED rather than kept:
+    `""` is not a valid path component and an empty prefix would otherwise
+    match every path, silently turning a fence into no fence. A var set to
+    only such entries therefore names nothing at all.
+    """
+    if raw is None:
+        return None
+    prefixes: List[str] = []
+    for p in raw.split(":"):
+        cleaned = p.strip().lstrip("/")
+        if cleaned:
+            prefixes.append(cleaned)
+    return prefixes
+
+
+def _prefix_match(rel: str, allow: Optional[List[str]]) -> bool:
+    """Does the vault-relative posix path `rel` fall inside `allow`?
+
+    `allow is None` means no restriction (True for everything); an empty list
+    means nothing is allowed. A prefix matches a whole path component,
+    case-sensitively - `Knowledge` allows `Knowledge/x.md` and
+    `Knowledge/sub/x.md`, never `Knowledgebase/x.md` or `knowledge/x.md` -
+    which is the same rule `_write_denied` applies, so the two fences describe
+    folders the same way. Empty prefixes are skipped defensively even though
+    `_norm_allow_prefixes` already drops them.
+    """
+    if allow is None:
+        return True
+    for prefix in allow:
+        p = prefix.rstrip("/")
+        if not p:
+            continue
+        if rel == p or rel.startswith(p + "/"):
+            return True
+    return False
+
+
+def _read_allow() -> Optional[List[str]]:
+    """The configured read allowlist, or None when there is none.
+
+    Read at call time and never cached at import, like `_write_allow`: the
+    server is a long-lived process and the tests set the variable per case.
+
+    Three states: unset -> None (read everything, today's behaviour); set ->
+    the colon-separated prefixes; empty (or every entry degenerate) -> [], a
+    connection that may read nothing.
+    """
+    return _norm_allow_prefixes(os.environ.get(_READ_ALLOW_ENV))
+
+
+def _normalize_folders(folders: Optional[List[str]]) -> Optional[List[str]]:
+    """Clean a caller-supplied `folders` list into allow-prefix form, or None.
+
+    Accepts the same shapes as one entry of the env fence so callers describe a
+    folder once and identically everywhere. A non-list (a bare string, say) is
+    treated as a single entry rather than being iterated character by character,
+    which would silently turn `"Knowledge/"` into eleven bogus prefixes.
+    Degenerate entries are dropped exactly as `_norm_allow_prefixes` drops them,
+    so a caller cannot pass `["/"]` and get the whole vault.
+    """
+    if folders is None:
+        return None
+    if isinstance(folders, str):
+        folders = [folders]
+    out: List[str] = []
+    for f in folders:
+        cleaned = str(f).strip().lstrip("/")
+        if cleaned:
+            out.append(cleaned)
+    return out
+
+
+def _read_denied(rel: str) -> Optional[Dict[str, Any]]:
+    """An error dict when the vault-relative `rel` is outside the read fence.
+
+    Returns None when reading is permitted. Callers that resolve a single
+    named note (`read_note`, `validate_note`) use this so a fenced path fails
+    LOUDLY - an explicit error naming the readable scope - rather than
+    returning an empty string or a not-found, which would leave the agent
+    guessing whether the note is missing or merely invisible.
+    """
+    allow = _read_allow()
+    if allow is None:
+        return None
+    if _prefix_match(rel, allow):
+        return None
+    named = ", ".join(allow) if allow else "(none: this connection may read no notes)"
+    return {"error": f"this connection may only read under: {named}; "
                      f"{rel} is outside that scope"}
 
 
@@ -690,10 +799,17 @@ def _warn_if_index_stale(vault: Path, scanned: List[str], notes: Dict[str, Any])
 def _semantic_fuse(
     query: str, lexical: List[Dict[str, Any]], vault: Path, limit: int,
     enabled: Optional[bool] = None, scanned: Optional[List[str]] = None,
+    folders: Optional[List[str]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Fuse lexical results with local semantic ranking via RRF. Returns None (so the
     caller uses pure lexical) whenever semantic is unavailable or anything fails.
-    enabled overrides the env toggle for this call (None = follow the env)."""
+    enabled overrides the env toggle for this call (None = follow the env).
+
+    The semantic arm reads note paths out of the embedding index, NOT out of
+    `_iter_notes`, so the read fence and the `folders` filter have to be
+    re-applied here or a fenced note would come back through the index even
+    though the lexical walk never saw it. Filtering happens before the
+    `_FUSE_DEPTH` slice, so a fenced note cannot consume a fusion slot either."""
     if not (_SEMANTIC_ENABLED if enabled is None else enabled):
         return None
     index_path = vault / _SEMANTIC_INDEX_FILE
@@ -726,9 +842,12 @@ def _semantic_fuse(
             units = n.get("_unit") or []
             return max((_dot(qunit, v) for v in units), default=0.0)
 
+        fence = _read_allow()
         sem = sorted(
             ({"path": rel, "title": n.get("title", rel), "score": _note_score(rel, n)}
-             for rel, n in notes.items() if n.get("_unit")),
+             for rel, n in notes.items()
+             if n.get("_unit")
+             and _prefix_match(rel, fence) and _prefix_match(rel, folders)),
             key=lambda r: r["score"], reverse=True,
         )[:_FUSE_DEPTH]
         lex_rank = {r["path"]: i for i, r in enumerate(lexical[:min(_FUSE_DEPTH, _FUSE_LEX_DEPTH)])}
@@ -751,15 +870,35 @@ def _semantic_fuse(
         return None  # any failure -> pure lexical, never break search
 
 
-def search(query: str, *, limit: int = 6, semantic: Optional[bool] = None) -> List[Dict[str, Any]]:
+def search(
+    query: str,
+    *,
+    limit: int = 6,
+    semantic: Optional[bool] = None,
+    folders: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     """Bounded keyword search over vault markdown, fused with local semantic search
     when an embedding index + Ollama are available (else pure lexical).
 
     semantic: force fusion on/off for this call. None (the default, what the MCP
     serves) follows OBSIDIAN_SEARCH_SEMANTIC. The eval harness passes False to get
     a genuinely pure lexical ranking - before this switch existed, "--mode lexical"
-    silently measured the fused blend under a false label (stress-test fix 10/24)."""
+    silently measured the fused blend under a false label (stress-test fix 10/24).
+
+    folders: restrict this search to these vault-relative folder prefixes, same
+    syntax as one entry of the read fence (Capsule Corp decision row 125). It
+    NARROWS, never widens: the effective scope is the intersection of `folders`
+    with `OBSIDIAN_MCP_READ_ALLOW`, so a caller cannot name its way out of the
+    fence. None (the default) means the fence alone decides. An empty list, or
+    a list of only degenerate entries, names no folder and so returns nothing -
+    it is not read as "no filter", because silently widening a caller's
+    explicit narrowing is the wrong failure direction for a scope parameter.
+    Filtering happens in the walk, before the scan cap and before `limit`, so
+    an out-of-scope note is never counted, ranked or truncated-around."""
     vault = resolve_vault()
+    folders = _normalize_folders(folders)
+    if folders is not None and not folders:
+        return []
     terms = _query_terms(query)
     if not terms:
         # Query was all stopwords/short tokens - fall back to the raw terms so a
@@ -781,7 +920,7 @@ def search(query: str, *, limit: int = 6, semantic: Optional[bool] = None) -> Li
     # this against the index for free rather than walking the vault a second time.
     seen: List[str] = []
     truncated = False
-    for i, md in enumerate(_iter_notes(vault)):
+    for i, md in enumerate(_iter_notes(vault, allow=folders)):
         if i >= _MAX_FILES_SCANNED:
             truncated = True
             break
@@ -828,7 +967,8 @@ def search(query: str, *, limit: int = 6, semantic: Optional[bool] = None) -> Li
             file=sys.stderr,
         )
     scored.sort(key=lambda r: r["score"], reverse=True)
-    fused = _semantic_fuse(query, scored, vault, limit, enabled=semantic, scanned=seen)
+    fused = _semantic_fuse(query, scored, vault, limit, enabled=semantic, scanned=seen,
+                           folders=folders)
     if fused is not None:
         return _freshness_rerank(fused, vault, current_intent)
     for r in scored:
@@ -863,6 +1003,13 @@ def read_note(
     target = _resolve_in_vault(vault, rel)
     if target is None:
         return {"error": "path is outside the vault"}
+    # Read fence (row 125). Checked on the RESOLVED path, so `Knowledge/../
+    # Decisions/x.md` is fenced by where it lands, not by how it was spelled;
+    # checked before the file is opened, so a refusal reveals nothing about
+    # whether the note exists. A clear error, never an empty string.
+    denied = _read_denied(target.relative_to(vault).as_posix())
+    if denied is not None:
+        return denied
     text = _read_safe(target)
     if text is None:
         return {"error": f"not found: {rel}"}
@@ -1274,6 +1421,11 @@ def validate_note(rel: str) -> Dict[str, Any]:
     target = _resolve_in_vault(vault, rel)
     if target is None:
         return {"error": "path is outside the vault"}
+    # Read fence (row 125): validation reports a note's frontmatter keys and
+    # every unresolved wikilink in it, which is note content by another name.
+    denied = _read_denied(target.relative_to(vault).as_posix())
+    if denied is not None:
+        return denied
     text = _read_safe(target)
     if text is None:
         return {"error": f"not found: {rel}"}
@@ -1482,7 +1634,7 @@ def get_skill(name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _iter_notes(vault: Path, *, base_only: bool = False):
+def _iter_notes(vault: Path, *, base_only: bool = False, allow: Optional[List[str]] = None):
     """Yield vault notes newest-first (modified time). Deterministic on purpose:
     every consumer of this iterator caps its scan, and a cap that bites must
     drop the oldest notes, never a random filesystem-order slice.
@@ -1494,11 +1646,31 @@ def _iter_notes(vault: Path, *, base_only: bool = False):
     accounting has to see everything the index policy might deny - including
     copilot/ and the skill mirror - not the already-narrowed lexical universe,
     or notes this function itself now excludes silently disappear from the
-    coverage report instead of being counted as "excluded"."""
+    coverage report instead of being counted as "excluded".
+
+    `allow` is an extra prefix filter for THIS call (the `folders` parameter on
+    `search`). It is applied on top of - never instead of - the process-wide
+    read fence (`OBSIDIAN_MCP_READ_ALLOW`), so the effective universe is the
+    INTERSECTION of the two: a caller naming `folders=["Decisions/"]` on a
+    connection fenced to `Knowledge/` gets nothing, not `Decisions/`. Both are
+    applied here, before any consumer's scan cap and before any ranking limit,
+    so a fenced note can never occupy a result slot or a cap slot and its
+    existence cannot be inferred from a count.
+
+    Unset fence + no `allow` -> every note the deny lists permit, i.e. exactly
+    the pre-fence behaviour."""
+    fence = _read_allow()
     found = []
     for md in vault.rglob("*.md"):
         rel = md.relative_to(vault)
         parts = rel.parts
+        rel_posix = rel.as_posix()
+        # Read fence first: it is a capability boundary, not a relevance
+        # policy, so it applies to every walk including base_only ones.
+        if not _prefix_match(rel_posix, fence):
+            continue
+        if not _prefix_match(rel_posix, allow):
+            continue
         if any(p.lower() in _SKIP_DIRS or p.lower().endswith("templates") for p in parts):
             continue
         if not base_only:
