@@ -44,6 +44,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_DIR = REPO_ROOT / "integrations" / "obsidian-mcp-server"
 sys.path.insert(0, str(MCP_DIR))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+# This module's own directory, so `import semantic_search` works when
+# retrieval_eval is imported (a test) and not only when it is run as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Load env (OBSIDIAN_VAULT_PATH + optional keys) the same way the research toolkit does.
 try:
@@ -74,20 +77,177 @@ _MIN_BODY_CHARS = 400
 
 
 # --------------------------------------------------------------------------- #
+# The §4.3 metric set (Capsule decision row 128, M077)
+# --------------------------------------------------------------------------- #
+# recall@k + MRR measure the search tool. They cannot see the two failures that
+# actually happened (a note 88% unembedded still passes if the answer is in the
+# first chunk, and coverage was never a metric), so four fields join them. Row
+# 128 fixed the floor: recall@5 75.9%, measured 2026-09-02, and a change may
+# not regress below it.
+FLOOR_RECALL_AT_5 = 0.759
+FLOOR_AS_OF = "2026-09-02"
+# Comparability comes from KEEPING old sets, not from never making new ones:
+# the corpus grew 11x under a frozen set and the job's own 2x guard fired and
+# was ignored. So a new set is a NEW FILE, named for the corpus it was cut at.
+REGENERATE_AT_MULTIPLE = 2.0
+
+
+def _top_folder(path: str) -> str:
+    """The first path segment, or `(root)` for a note in the vault root. A
+    root note is bucketed, never dropped: `index.md` losing is a real miss."""
+    head, _, tail = str(path).partition("/")
+    return head if tail else "(root)"
+
+
+def recall_by_folder(per_case: list[dict], k: int = 5) -> dict[str, dict]:
+    """recall@k grouped by the gold note's top folder.
+
+    Separates corpus growth from retrieval quality: a vault-wide recall drop
+    caused entirely by 400 new `Daily/` notes looks identical to a real
+    regression until it is split this way.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for c in per_case:
+        gold = (c.get("gold") or [None])[0]
+        if not gold:
+            continue
+        buckets.setdefault(_top_folder(gold), []).append(c)
+    out = {}
+    for folder, cases in sorted(buckets.items()):
+        hits = sum(1 for c in cases if 0 < c.get("rank", 0) <= k)
+        out[folder] = {"cases": len(cases), "recall_at_5": round(hits / len(cases), 3)}
+    return out
+
+
+def _pct(values: list[int], q: float) -> int:
+    """Nearest-rank percentile on a sorted list - stdlib-shaped, no numpy."""
+    s = sorted(values)
+    idx = min(len(s) - 1, max(0, int(round(q * (len(s) - 1)))))
+    return s[idx]
+
+
+def chunk_hit_position(per_case: list[dict]) -> dict | None:
+    """p50/p90 of the 1-based chunk index that carried the winning score.
+
+    This is the metric §0.5's failure needed: when the answer is always in
+    chunk 1, a broken chunker is invisible. None (absent, not zero) when the
+    search engine reports no chunk - `--mode lexical` never will.
+    """
+    chunks = [int(c["chunk"]) for c in per_case if c.get("chunk")]
+    if not chunks:
+        return None
+    return {"p50": _pct(chunks, 0.5), "p90": _pct(chunks, 0.9),
+            "max": max(chunks), "cases": len(chunks)}
+
+
+def stale_hit_rate(per_case: list[dict], superseded: set[str]) -> float:
+    """Share of cases whose top hit is a note carrying `superseded-by:`.
+
+    LongMemEval's knowledge-updates ability, untested here until now: a
+    superseded note outranking its successor is worse than a miss, because the
+    role gets a confident wrong answer instead of nothing.
+    """
+    if not per_case:
+        return 0.0
+    bad = sum(1 for c in per_case if c.get("top_hit") in superseded)
+    return round(bad / len(per_case), 3)
+
+
+def superseded_paths(vault: Path) -> set[str]:
+    """Vault-relative paths whose frontmatter carries a `superseded-by:` key.
+    Frontmatter only - the string in a note's prose is discussion, not state."""
+    out = set()
+    for md in _candidate_notes(vault):
+        try:
+            head = md.read_text(encoding="utf-8", errors="replace")[:2000]
+        except OSError:
+            continue
+        if not head.startswith("---") or head.count("---") < 2:
+            continue
+        if "superseded-by:" in head.split("---", 2)[1]:
+            out.add(md.relative_to(vault).as_posix())
+    return out
+
+
+def floor_block(recall_at_5: float) -> dict:
+    """The floor, as a fact in the summary rather than a number in a note."""
+    return {"recall_at_5": FLOOR_RECALL_AT_5, "as_of": FLOOR_AS_OF,
+            "measured": round(float(recall_at_5), 3),
+            "regressed": round(float(recall_at_5), 3) < FLOOR_RECALL_AT_5}
+
+
+def needs_regeneration(*, eligible: int, baseline: int) -> bool:
+    return baseline > 0 and eligible >= baseline * REGENERATE_AT_MULTIPLE
+
+
+def cases_filename(eligible: int) -> str:
+    return f"retrieval_cases-{int(eligible)}notes.jsonl"
+
+
+# --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
 def _vault() -> Path:
     return vault_ops.resolve_vault()
 
 
+def _lexical_exclusion(rel: str) -> str | None:
+    """Why the LEXICAL arm can never return `rel`, or None.
+
+    Reads `vault_ops`' own deny lists (row 124) rather than restating them, so
+    this cannot drift from what `search()` actually scans.
+    """
+    parts = tuple(p.lower() for p in Path(rel).parts)
+    for p in parts:
+        if p in vault_ops._SKIP_DIRS or p.endswith("templates"):
+            return f"skip dir: {p}/"
+    for p in parts[:-1]:
+        if p in vault_ops._LEXICAL_DENY_DIR_NAMES:
+            return f"lexical denied dir: {p}/"
+    low = rel.lower()
+    for pref in vault_ops._LEXICAL_DENY_PATH_PREFIXES:
+        if low.startswith(pref):
+            return f"lexical denied prefix: {pref}"
+    if vault_ops._LEXICAL_MIRROR_RE.search(rel):
+        return "skill mirror (**/skills/<tool>/<role>/<doc>.md)"
+    if rel.endswith(".excalidraw.md"):
+        return "excalidraw drawing"
+    return None
+
+
+def retrieval_exclusion(rel: str) -> str | None:
+    """Why no search arm can ever return `rel`, or None if it is retrievable.
+
+    An eval case whose gold note is unretrievable BY POLICY scores a
+    guaranteed miss and measures nothing. On 2026-09-10 a fresh
+    `--generate 30 --style semantic` sampled `Architecture/skills/hermes/...`
+    mirror notes the index excludes on purpose, and the resulting set scored
+    recall@5 10% by construction (C4 task 1, decision row 128).
+
+    Both arms are consulted through their real predicates - the semantic
+    index's `policy_verdict` and `vault_ops`' lexical deny lists - so a note
+    either arm refuses is out. No third copy of the rules lives here.
+    """
+    lex = _lexical_exclusion(rel)
+    if lex:
+        return lex
+    try:
+        import semantic_search as ss
+    except Exception as exc:  # pragma: no cover - the index policy is the point
+        print(f"  index-policy check skipped: {exc}", file=sys.stderr)
+        return None
+    return ss.policy_verdict(rel)
+
+
 def _candidate_notes(vault: Path) -> list[Path]:
-    """Knowledge notes worth asking about - substantial, not raw sources."""
+    """Knowledge notes worth asking about - substantial, not raw sources, and
+    RETRIEVABLE: a note the search policy excludes can never be found."""
     out: list[Path] = []
     for md in sorted(vault.rglob("*.md")):
         rel = md.relative_to(vault).as_posix()
         if any(rel.startswith(p) for p in _SKIP_PREFIXES):
             continue
-        if vault_ops._SKIP_DIRS & set(Path(rel).parts):
+        if retrieval_exclusion(rel):
             continue
         try:
             body = md.read_text(encoding="utf-8", errors="ignore")
@@ -166,12 +326,21 @@ def _heuristic_question(body: str, title: str) -> str | None:
     return f"What does the vault say about: {best}" if best else None
 
 
-def generate(n: int, cases_path: Path, style: str = "semantic") -> int:
+def generate(n: int, cases_path: Path, style: str = "semantic", force: bool = False) -> int:
     vault = _vault()
     notes = _candidate_notes(vault)
     if not notes:
         print("No candidate knowledge notes found in the vault.", file=sys.stderr)
         return 1
+    # The corpus this set is cut at, named in the filename: a set is comparable
+    # to its successors only if you can see which corpus each one measured.
+    if cases_path == DEFAULT_CASES:
+        cases_path = cases_path.with_name(cases_filename(len(notes)))
+        print(f"Cutting a new set at {len(notes)} eligible notes -> {cases_path.name}")
+        if cases_path.exists() and not force:
+            print(f"Refusing to overwrite {cases_path}; pass --force or --cases <new-path>.",
+                  file=sys.stderr)
+            return 1
     # Deterministic, well-spread sample (no Date/random; stable across runs).
     step = max(1, len(notes) // n)
     sampled = notes[::step][:n]
@@ -358,6 +527,10 @@ def evaluate(cases_path: Path, as_json: bool, mode: str = "lexical") -> int:
             "rank": rank,
             "top_hit": top,
             "title": c.get("title", ""),
+            # Which chunk of the gold note carried the winning score. Unset
+            # when the engine does not report one (lexical, external, and the
+            # shipped `default` fusion) - never synthesised as 1.
+            "chunk": (results[rank - 1].get("chunk") if 0 < rank <= len(results) else None),
         })
 
     n = len(per_case)
@@ -374,6 +547,17 @@ def evaluate(cases_path: Path, as_json: bool, mode: str = "lexical") -> int:
         "misses": len(misses),
         "buried_below_3": len(buried),
     }
+    # The §4.3 metric set, ADDED to the existing keys so every trend built on
+    # them survives (decision row 128).
+    summary["recall_at_5_by_folder"] = recall_by_folder(per_case, k=5)
+    summary["chunk_hit_position"] = chunk_hit_position(per_case)
+    try:
+        summary["stale_hit_rate"] = stale_hit_rate(per_case, superseded_paths(_vault()))
+    except Exception as exc:  # a vault read must never take the eval down
+        print(f"  stale-hit probe skipped: {exc}", file=sys.stderr)
+        summary["stale_hit_rate"] = None
+    summary["floor"] = floor_block(recall[5])
+    summary["cases_file"] = cases_path.name
 
     if as_json:
         # Force UTF-8 stdout: on Windows a pipe defaults to cp1252, which cannot
@@ -391,6 +575,18 @@ def evaluate(cases_path: Path, as_json: bool, mode: str = "lexical") -> int:
         bar = "#" * round(recall[k] * 40)
         print(f"  recall@{k:<2} {recall[k]*100:5.1f}%  {bar}")
     print(f"  MRR      {mrr:.3f}")
+    if summary["floor"]["regressed"]:
+        print(f"  FLOOR      recall@5 {recall[5]*100:.1f}% is BELOW the "
+              f"{FLOOR_RECALL_AT_5*100:.1f}% floor of {FLOOR_AS_OF} - a regression")
+    for folder, s in summary["recall_at_5_by_folder"].items():
+        flag = "  <-- under 50%" if s["cases"] >= 3 and s["recall_at_5"] < 0.5 else ""
+        print(f"  {folder:<14} recall@5 {s['recall_at_5']*100:5.1f}%  ({s['cases']} cases){flag}")
+    if summary["chunk_hit_position"]:
+        print(f"  chunk pos  p50 {summary['chunk_hit_position']['p50']}, "
+              f"p90 {summary['chunk_hit_position']['p90']}")
+    if summary["stale_hit_rate"]:
+        print(f"  stale hits {summary['stale_hit_rate']*100:.1f}% of cases were topped "
+              f"by a superseded note")
     print(f"  misses (gold not in top {SEARCH_LIMIT}): {len(misses)}   buried (rank>3): {len(buried)}")
 
     if misses:
@@ -430,7 +626,9 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.generate is not None:
-        if args.cases.exists() and not args.force:
+        # The default path is not the file that gets written: generate() renames
+        # it to the corpus-versioned name and re-checks the guard there.
+        if args.cases != DEFAULT_CASES and args.cases.exists() and not args.force:
             print(
                 f"Refusing to overwrite existing cases at {args.cases}: regenerating "
                 f"mid-experiment breaks the before/after comparison on the SAME cases.\n"
@@ -438,7 +636,7 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        return generate(args.generate, args.cases, args.style)
+        return generate(args.generate, args.cases, args.style, args.force)
     return evaluate(args.cases, args.json, args.mode)
 
 
