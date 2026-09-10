@@ -95,6 +95,62 @@ def test_fuse_scores_by_best_chunk_too(vault, monkeypatch):
     assert fused[0]["path"] == "dossier.md"
 
 
+# --------------------------------------------------------------------------- #
+# `chunk`: which section won, on the mode the MCP actually serves
+# (Capsule decision row 128 - `retrieval_eval.chunk_hit_position`)
+# --------------------------------------------------------------------------- #
+def test_fused_results_name_the_winning_chunk_and_lexical_only_hits_do_not(vault, monkeypatch):
+    """A semantic hit reports the 1-based index of its best chunk; a hit that
+    only the lexical arm found reports None, never a synthesised 1. Without
+    this, a chunker that embeds a fraction of every note is invisible to
+    recall@k, which is exactly how 45% of a vault went unembedded unnoticed."""
+    index = {
+        "model": "fake", "format": 2,
+        "notes": {
+            # The SECOND chunk is the relevant one.
+            "dossier.md": {"title": "dossier", "vecs": [[0.0, 1.0], [1.0, 0.0]]},
+        },
+    }
+    (vault / vault_ops._SEMANTIC_INDEX_FILE).write_text(json.dumps(index), encoding="utf-8")
+    monkeypatch.setattr(vault_ops, "_embed_query", lambda q, **kw: [1.0, 0.0])
+    lexical = [{"path": "wordmatch.md", "title": "wordmatch", "snippet": "", "chunk": None}]
+    fused = vault_ops._semantic_fuse("some multi word query", lexical, vault, 5, enabled=True)
+    by_path = {r["path"]: r for r in fused}
+    assert by_path["dossier.md"]["chunk"] == 2
+    assert by_path["wordmatch.md"]["chunk"] is None
+    # ...and `score` is still the scalar every consumer sorts on (it is popped
+    # from the returned rows, so its absence here is the contract).
+    assert "score" not in by_path["dossier.md"]
+
+
+def _write_note(vault, rel, body):
+    p = vault / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(f"---\ntype: concept\n---\n\n{body}\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+def test_search_results_always_carry_a_chunk_key(vault, monkeypatch, semantic):
+    """`chunk` is a uniform part of a result - an int or None - on the fused
+    path AND on the pure-lexical fallback a keyless install runs."""
+    _write_note(vault, "Knowledge/gateway pattern.md", "The gateway pattern for retry logic.")
+    if semantic:
+        (vault / vault_ops._SEMANTIC_INDEX_FILE).write_text(json.dumps({
+            "model": "fake", "format": 2,
+            "notes": {"Knowledge/gateway pattern.md": {
+                "title": "gateway pattern", "vecs": [[0.0, 1.0], [1.0, 0.0]]}},
+        }), encoding="utf-8")
+        monkeypatch.setattr(vault_ops, "_embed_query", lambda q, **kw: [1.0, 0.0])
+
+    hits = vault_ops.search("gateway retry pattern", limit=5, semantic=semantic)
+    assert hits, "the lexical arm must still find the note"
+    for h in hits:
+        assert "chunk" in h, h
+        assert h["chunk"] is None or isinstance(h["chunk"], int)
+    if semantic:
+        assert hits[0]["chunk"] == 2, hits
+
+
 def test_prepare_note_text_header_and_scaffolding():
     header, body = ss.prepare_note_text(
         "Atlas",

@@ -72,26 +72,35 @@ INDEX_FILE = ".obsidian-semantic-index.json"  # written at vault root
 # --------------------------------------------------------------------------- #
 # `bge-m3` (the default and the model named in every index built so far) accepts
 # inputs "from short sentences to long documents of up to 8,192 tokens"
-# (M3-Embedding, arXiv:2402.03216, 2024-02-05, rev. 2025-12-12). The previous
-# geometry here - 1,200 chars x 8 chunks - was sized for a "typically ~512 token"
-# model and therefore embedded at most 9,600 characters of any note. Measured on
-# ~/second-brain on 2026-09-09 that silently discarded 45% of all vault text:
-# 464 of 950 notes exceeded the cap, and everything past it could never be
-# retrieved semantically, at any rank, by any query.
+# (M3-Embedding, arXiv:2402.03216, 2024-02-05, rev. 2025-12-12), so a 6,000-char
+# chunk FITS the model. On 2026-09-09 that fact alone moved the geometry from
+# 1,200 x 8 to 6,000 x 64, to stop the 1,200 x 8 ceiling discarding 45% of vault
+# text (464 of 950 notes exceeded 9,600 embedded chars).
 #
-# The fix has two halves. The chunk grows to ~1,500-1,700 tokens - big enough to
-# hold a whole `##` section, small enough that max-over-chunks scoring stays
-# precise (a note is as relevant as its most relevant section) and far enough
-# under 8,192 that a token-dense table still fits. And the count cap stops being
-# the note's size limit: it is now a SAFETY CEILING only.
+# Then it was measured. On the same 29-case set on the same vault, 2026-09-10
+# (Capsule decision row 128, C4 task 1): the 6,000 x 64 chunker scores default
+# recall@5 41.4% (MRR 0.295); the 1,200 x 8 chunker on a scratch rebuild of the
+# SAME content scores 51.7% (MRR 0.43). Fitting the window is not the same as
+# retrieving well: notes score by their best chunk, and a 6,000-char chunk
+# averages a whole page of mixed topics into one vector, so the section that
+# actually answers the query is diluted by the five that do not. A smaller chunk
+# is a sharper unit of relevance.
+#
+# So the geometry is back at 1,200 x 8 - ten measured points of recall beat a
+# coverage argument. The known cost is real and is the reverse trade: a note past
+# 9,600 chars is embedded only up to the ceiling. It is no longer SILENT, which
+# was the actual 2026-09-09 defect - `embed_note_chunks` names every note that
+# reaches the ceiling on stderr, and `--stats` counts them (`at_ceiling`). The
+# principled fix for long notes is a per-note chunk budget rather than a bigger
+# chunk; until that is measured, this reverts cleanly by editing two numbers
+# (the chunker fingerprint below invalidates the cache either way).
 _MODEL_WINDOW_TOKENS = 8192          # bge-m3's real input window - see above
-_CHUNK_CHARS = 6000                  # ~1,500-1,700 tokens at ~3.5-4 chars/token
+_CHUNK_CHARS = 1200                  # ~300-350 tokens: a sharp unit of relevance
 _CHUNK_OVERLAP_CHARS = 500           # a fact on a boundary lands in both chunks
-# Safety ceiling, NOT the working limit: 64 x 6,000 = 384,000 chars ~ 60,000
-# words, which covers the largest note in the vault (19,649 words, ~130k chars,
-# ~22 chunks) with 3x headroom. A note that hits 64 is pathological and gets
-# named on stderr instead of being silently truncated.
-_MAX_CHUNKS = 64
+                                     # (self-caps at room // 4, so ~300 here)
+# The per-note ceiling: 8 x 1,200 = 9,600 embedded chars. A note that reaches it
+# is named on stderr and counted by `--stats`, never truncated in silence.
+_MAX_CHUNKS = 8
 # Never subdivide below this: past it, chunks carry no context worth embedding.
 _MIN_CHUNK_CHARS = 200
 
@@ -802,14 +811,26 @@ def semantic_search(query: str, index: dict, limit: int = 10) -> list[dict]:
     # The query must live in the same vector space as the index (fix 16/24).
     qvec = embed(query, model=index.get("model"))
 
-    def _score(n: dict) -> float:
-        vecs = n.get("vecs") or ([n["vec"]] if n.get("vec") else [])
-        return max((cosine(qvec, v) for v in vecs), default=0.0)
+    def _score(n: dict) -> tuple[float, int | None]:
+        """Best chunk's cosine and its 1-based index.
 
-    scored = [
-        {"path": rel, "title": n["title"], "score": _score(n)}
-        for rel, n in index["notes"].items()
-    ]
+        The index is reported so the eval can measure WHERE in a note the
+        winning evidence sat (`retrieval_eval.chunk_hit_position`): when every
+        hit lands in chunk 1, a chunker that drops the rest of the note is
+        invisible to recall@k.
+        """
+        vecs = n.get("vecs") or ([n["vec"]] if n.get("vec") else [])
+        best = (0.0, None)
+        for i, v in enumerate(vecs, start=1):
+            s = cosine(qvec, v)
+            if best[1] is None or s > best[0]:
+                best = (s, i)
+        return best
+
+    scored = []
+    for rel, n in index["notes"].items():
+        score, chunk = _score(n)
+        scored.append({"path": rel, "title": n["title"], "score": score, "chunk": chunk})
     scored.sort(key=lambda r: r["score"], reverse=True)
     return scored[:limit]
 
@@ -829,6 +850,7 @@ def hybrid_search(query: str, index: dict, lexical_results: list[dict], limit: i
     sem = semantic_search(query, index, limit=max(limit, 20))
     sem_rank = _rank_map(sem)
     lex_rank = _rank_map(lexical_results)
+    sem_chunk = {r["path"]: r.get("chunk") for r in sem}
     paths = set(sem_rank) | set(lex_rank)
     fused = []
     for p in paths:
@@ -838,7 +860,9 @@ def hybrid_search(query: str, index: dict, lexical_results: list[dict], limit: i
         if p in sem_rank:
             score += 1.0 / (K + sem_rank[p])
         title = next((r["title"] for r in (sem + lexical_results) if r["path"] == p), p)
-        fused.append({"path": p, "title": title, "score": score})
+        # Carry the semantic arm's winning chunk through the fusion; a purely
+        # lexical hit has none, and None is the honest answer there.
+        fused.append({"path": p, "title": title, "score": score, "chunk": sem_chunk.get(p)})
     fused.sort(key=lambda r: r["score"], reverse=True)
     return fused[:limit]
 

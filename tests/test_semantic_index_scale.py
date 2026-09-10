@@ -5,11 +5,16 @@ killed.
 Measured on ~/second-brain on 2026-09-09 (Study - Capsule Corp's memory at
 scale), the index had three defects that these tests pin shut:
 
-1. **45% of all vault text was never embedded.** The chunker was sized for a
-   "typically ~512 token" model - 1,200 chars x 8 chunks - so a note was
-   embedded for at most 9,600 characters and everything after it could not be
-   retrieved semantically at any rank by any query. 464 of 950 notes exceeded
-   that cap. `bge-m3`, the model actually configured, accepts 8,192 tokens.
+1. **A long note was truncated in SILENCE.** 1,200 chars x 8 chunks embedded at
+   most 9,600 characters of a note; 464 of 950 notes exceeded that cap and
+   nothing said so. The 2026-09-09 fix moved the geometry to 6,000 x 64 because
+   `bge-m3` accepts 8,192 tokens - and then it was measured. On the same 29
+   cases on the same vault, 2026-09-10 (C4 task 1, decision row 128), 6,000 x 64
+   scored default recall@5 41.4% against 51.7% for 1,200 x 8: a note scores by
+   its best chunk, and a 6,000-char chunk dilutes the section that answers the
+   query with five that do not. So the geometry is 1,200 x 8 again, and the
+   fixed defect is the silence - the ceiling now names the note on stderr and
+   `--stats` counts it.
 2. **It indexed what the vault forbids.** 17 of 107 indexed notes came from
    `copilot/`, which `_CLAUDE.md` tells every agent and job to ignore entirely,
    while three quarters of the vault is a skill mirror putting ten identical
@@ -74,25 +79,35 @@ def _big_note(words: int) -> str:
 # --------------------------------------------------------------------------- #
 # 1. Chunking: the model's window, not a guess
 # --------------------------------------------------------------------------- #
-def test_chunk_geometry_matches_the_model_window():
-    """The constants must be self-documenting: the ceiling is a safety net, and
-    a chunk must be a meaningful fraction of bge-m3's 8,192-token window."""
+def test_chunk_geometry_is_the_measured_one():
+    """The geometry is pinned to what MEASURED best, not to what fits the model.
+
+    Both geometries fit bge-m3's 8,192-token window. On the same 29 cases on the
+    same vault, 2026-09-10 (C4 task 1, decision row 128), 6,000 x 64 scored
+    default recall@5 41.4% and 1,200 x 8 scored 51.7% - notes score by their
+    best chunk, and a 6,000-char chunk averages a page of mixed topics into one
+    vector. Ten points of recall beat the coverage argument, so the numbers here
+    are 1,200 x 8. Change them only with a new measurement.
+    """
     assert ss._MODEL_WINDOW_TOKENS == 8192, "bge-m3's real input window"
-    assert ss._CHUNK_CHARS >= 4000, "a chunk must hold a whole ## section"
-    assert ss._MAX_CHUNKS >= 64, "the count cap must not be the note's size limit"
-    # The per-note budget must cover the largest note in the vault (19,649
-    # words, ~130k chars) with room to spare.
-    assert ss._MAX_CHUNKS * ss._CHUNK_CHARS >= 20_000 * 6
-    assert 0 < ss._CHUNK_OVERLAP_CHARS < ss._CHUNK_CHARS
+    assert ss._CHUNK_CHARS == 1200, "measured better than 6000 on 2026-09-10"
+    assert ss._MAX_CHUNKS == 8, "measured better than 64 on 2026-09-10"
+    assert 0 < ss._CHUNK_OVERLAP_CHARS
+    assert ss._MIN_CHUNK_CHARS < ss._CHUNK_CHARS
 
 
-def test_fifteen_thousand_word_note_yields_more_than_eight_chunks():
-    """The headline regression: the old geometry gave this note 8 chunks and
-    threw away 88% of it."""
+def test_a_long_note_is_chunked_completely_and_truncation_is_loud():
+    """The chunker itself never truncates - `chunk_note_text` covers the whole
+    note - and the per-note ceiling that DOES cut it says so by name.
+
+    This is what the 2026-09-09 defect actually was: not that a long note was
+    capped, but that it was capped in silence. `embed_note_chunks` names it on
+    stderr and `--stats` counts it (`at_ceiling`).
+    """
     text = _big_note(15_000)
     chunks = ss.chunk_note_text(text, header="Title | study\n")
-    assert len(chunks) > 8, f"only {len(chunks)} chunks - the cap is back"
-    assert len(chunks) <= ss._MAX_CHUNKS, "must fit under the safety ceiling"
+    assert len(chunks) > ss._MAX_CHUNKS, "the chunker must not apply the ceiling"
+    assert sum(len(c) for c in chunks) >= len(text.strip())
 
 
 def test_no_text_is_dropped():
@@ -123,7 +138,10 @@ def test_chunks_split_on_headings_not_mid_sentence(monkeypatch):
     its predecessor.
     """
     monkeypatch.setattr(ss, "_CHUNK_OVERLAP_CHARS", 0)
-    text = "\n\n".join(f"## Heading {i}\n\n" + ("body sentence. " * 250) for i in range(6))
+    # Sections sized to roughly half a chunk, so "near the chunk size" holds for
+    # whatever geometry is configured rather than for one hardcoded number.
+    reps = max(2, (ss._CHUNK_CHARS // 2) // len("body sentence. "))
+    text = "\n\n".join(f"## Heading {i}\n\n" + ("body sentence. " * reps) for i in range(6))
     chunks = ss.chunk_note_text(text)
     assert len(chunks) > 1
     for c in chunks:
@@ -494,12 +512,15 @@ def test_search_api_is_unchanged(tmp_path, monkeypatch):
 
     hits = ss.semantic_search("anything", index, limit=3)
     assert len(hits) == 3
-    assert set(hits[0]) == {"path", "title", "score"}
+    # `chunk` joined the result dict for the eval's chunk-hit-position metric
+    # (decision row 128): the 1-based index of the chunk that won the score.
+    assert set(hits[0]) == {"path", "title", "score", "chunk"}
+    assert hits[0]["chunk"] >= 1
 
     lexical = [{"path": "Knowledge/note-01.md", "title": "note-01"}]
     fused = ss.hybrid_search("anything", index, lexical, limit=3)
     assert len(fused) == 3
-    assert set(fused[0]) == {"path", "title", "score"}
+    assert set(fused[0]) == {"path", "title", "score", "chunk"}
 
 
 def test_coverage_counts_only_notes_the_index_is_meant_to_hold(tmp_path, monkeypatch):
