@@ -834,17 +834,34 @@ def _semantic_fuse(
         # Best-chunk scoring (fix 13/24): a note is as relevant as its most
         # relevant section, not the average of everything it contains.
         def _note_score(rel, n):
-            """A note is as relevant as its most relevant section. Pure max won
-            the measured sweep (vs multiplicative type weights on cosine - which
-            deleted log notes outright, recall halved - vs additive nudges, vs a
-            70/30 max+mean blend): fix 13/24, all variants scored on both case
-            sets before shipping."""
+            """A note is as relevant as its most relevant section, and WHICH
+            section that was. Pure max won the measured sweep (vs multiplicative
+            type weights on cosine - which deleted log notes outright, recall
+            halved - vs additive nudges, vs a 70/30 max+mean blend): fix 13/24,
+            all variants scored on both case sets before shipping.
+
+            The 1-based chunk index rides along so the retrieval eval can
+            measure chunk-hit position on the mode the MCP actually serves
+            (`retrieval_eval.chunk_hit_position`, Capsule decision row 128):
+            when every hit lands in chunk 1, a chunker that never embeds the
+            rest of the note is invisible to recall@k.
+            """
             units = n.get("_unit") or []
-            return max((_dot(qunit, v) for v in units), default=0.0)
+            return max(((_dot(qunit, v), i) for i, v in enumerate(units, 1)),
+                       default=(0.0, None))
 
         fence = _read_allow()
+
+        def _sem_hit(rel, n):
+            # Scored ONCE per note: this is the hottest loop in the search path.
+            # `score` stays a scalar - it is the sort key and every consumer
+            # reads it as a number - and the chunk index is a separate field.
+            score, chunk = _note_score(rel, n)
+            return {"path": rel, "title": n.get("title", rel),
+                    "score": score, "chunk": chunk}
+
         sem = sorted(
-            ({"path": rel, "title": n.get("title", rel), "score": _note_score(rel, n)}
+            (_sem_hit(rel, n)
              for rel, n in notes.items()
              if n.get("_unit")
              and _prefix_match(rel, fence) and _prefix_match(rel, folders)),
@@ -856,11 +873,16 @@ def _semantic_fuse(
         title = {r["path"]: r["title"] for r in lexical}
         for r in sem:
             title.setdefault(r["path"], r["title"])
+        sem_chunk = {r["path"]: r["chunk"] for r in sem}
         fused = []
         for p in set(lex_rank) | set(sem_rank):
             s = (1.0 / (_RRF_K + lex_rank[p]) if p in lex_rank else 0.0) \
                 + (_RRF_SEMANTIC_WEIGHT / (_RRF_K + sem_rank[p]) if p in sem_rank else 0.0)
-            fused.append({"path": p, "title": title.get(p, p), "snippet": snippet.get(p, ""), "score": s})
+            # `chunk`: which section of the note carried its semantic score, or
+            # None for a purely lexical hit. Read by the retrieval eval's
+            # chunk-hit-position metric (row 128); never synthesised as 1.
+            fused.append({"path": p, "title": title.get(p, p), "snippet": snippet.get(p, ""),
+                          "score": s, "chunk": sem_chunk.get(p)})
         fused.sort(key=lambda r: r["score"], reverse=True)
         out = fused[:limit]
         for r in out:
@@ -958,6 +980,11 @@ def search(
                     "title": md.stem,
                     "score": score,
                     "snippet": _snippet(text, terms),
+                    # No chunk: this is a word match, not a section vector. The
+                    # key is present on both paths so `chunk` is a uniform part
+                    # of a result (int on a semantic hit, None otherwise) rather
+                    # than a field a caller has to guess at.
+                    "chunk": None,
                 }
             )
     if truncated:

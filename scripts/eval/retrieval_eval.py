@@ -155,9 +155,17 @@ def stale_hit_rate(per_case: list[dict], superseded: set[str]) -> float:
 
 def superseded_paths(vault: Path) -> set[str]:
     """Vault-relative paths whose frontmatter carries a `superseded-by:` key.
-    Frontmatter only - the string in a note's prose is discussion, not state."""
+    Frontmatter only - the string in a note's prose is discussion, not state.
+
+    Walks the whole vault, deliberately NOT `_candidate_notes`: that filter
+    answers "is this note worth asking a question about", which is a different
+    question. A 100-char stub whose entire content is `superseded-by:` is not a
+    candidate for a case, but if it tops a result it is exactly the failure this
+    metric exists to catch - and so is a policy-excluded note reached by the arm
+    that does not exclude it.
+    """
     out = set()
-    for md in _candidate_notes(vault):
+    for md in sorted(vault.rglob("*.md")):
         try:
             head = md.read_text(encoding="utf-8", errors="replace")[:2000]
         except OSError:

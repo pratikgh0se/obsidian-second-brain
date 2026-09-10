@@ -120,6 +120,36 @@ class SupersededProbe(unittest.TestCase):
             encoding="utf-8")
         self.assertEqual(re_mod.superseded_paths(root), {"Knowledge/old.md"})
 
+    def test_a_short_stub_and_a_policy_excluded_note_still_count_as_superseded(self):
+        """The probe walks the whole vault, not `_candidate_notes`.
+
+        "Is this note worth asking a question about" and "would this note give a
+        confident wrong answer if it topped a result" are different questions. A
+        100-char stub is not a case candidate, and a mirror note is excluded from
+        the semantic index - but either one topping a result is precisely the
+        failure `stale_hit_rate` exists to count.
+        """
+        import shutil
+        import tempfile
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        stub = "---\ntype: note\nsuperseded-by: \"[[new]]\"\n---\n\nMoved. See the new note.\n"
+        self.assertLess(len(stub), 120, "the point of this test is a note too short to be a case")
+        (root / "Knowledge").mkdir(parents=True)
+        (root / "Knowledge" / "stub.md").write_text(stub, encoding="utf-8")
+        mirror = root / "Architecture" / "skills" / "hermes" / "researcher" / "old.md"
+        mirror.parent.mkdir(parents=True)
+        mirror.write_text(stub, encoding="utf-8")
+
+        # Neither is a case candidate...
+        self.assertEqual(re_mod._candidate_notes(root), [])
+        # ...and both are known to be superseded.
+        self.assertEqual(
+            re_mod.superseded_paths(root),
+            {"Knowledge/stub.md", "Architecture/skills/hermes/researcher/old.md"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
