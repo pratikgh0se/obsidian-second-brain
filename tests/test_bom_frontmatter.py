@@ -12,6 +12,7 @@ rule); only the readers stop being blind.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -85,3 +86,27 @@ def test_link_graph_reads_bom_note_type(tmp_path):
     payload = json.loads(result.stdout[result.stdout.find("{"):])
     bom_nodes = [n for n in payload["nodes"] if "bom-note" in n["path"]]
     assert bom_nodes and bom_nodes[0].get("type") == "project", bom_nodes
+
+
+def test_session_hook_strips_bom_from_the_manual(tmp_path):
+    """The SessionStart hook is a seventh read site. It read _CLAUDE.md as plain
+    utf-8, so a BOM-adding editor put U+FEFF in the middle of the injected
+    context, glued to the manual's first line."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "_CLAUDE.md").write_text("\ufeff# Vault manual\n\nOne rule.\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "hooks/load_vault_context.py"],
+        cwd=REPO_ROOT,
+        input=json.dumps({"cwd": str(vault)}),
+        env=dict(os.environ, OBSIDIAN_VAULT_PATH=str(vault)),
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "\ufeff" not in context
+    assert "\n# Vault manual\n" in context

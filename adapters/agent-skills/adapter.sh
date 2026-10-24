@@ -87,7 +87,8 @@ _ask_emit_skills() {
       echo "  category: $category"
       echo "---"
       echo
-      _ask_preamble
+      # Crew can run without a vault; its command owns setup and discovery.
+      [[ "$name" == "crew" ]] || _ask_preamble
       command_body "$f"
       echo
       echo "---"
@@ -143,6 +144,7 @@ _ask_emit_core() {
   if [[ -d "$src/scripts" ]]; then
     mkdir -p "$dst/scripts"
     cp -R "$src/scripts/." "$dst/scripts/"
+    copy_vault_ops "$src" "$dst"  # see adapters/lib.sh (#332)
   fi
   [[ -f "$src/pyproject.toml" ]] && cp "$src/pyproject.toml" "$dst/pyproject.toml"
 

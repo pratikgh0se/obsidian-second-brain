@@ -84,6 +84,28 @@ def test_unreadable_notes_are_footnoted_not_hidden(tmp_path):
     assert "1 unreadable file(s) skipped" in block.stdout
 
 
+def test_dot_prefixed_files_are_not_counted(tmp_path):
+    """AppleDouble companions (._Note.md on exFAT/SMB) must not inflate stats.
+
+    Twin of vault_health's #290 fix: on a macOS volume with no native extended
+    attributes, every file acquires a binary ._<name> sibling that rglob
+    matches. vault_health stopped counting them; vault_stats must too."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Note.md").write_text("---\ntype: concept\n---\nbody\n", encoding="utf-8")
+    # AppleDouble companion - same name, dot-prefixed
+    (vault / "._Note.md").write_text("---\ntype: concept\n---\nbody\n", encoding="utf-8")
+    # Dot-prefixed subdirectory
+    (vault / ".hidden").mkdir()
+    (vault / ".hidden" / "secret.md").write_text("---\ntype: concept\n---\nbody\n", encoding="utf-8")
+
+    result = _run("--path", str(vault), "--json")
+    assert result.returncode == 0, result.stderr
+    stats = _json_of(result)
+    assert stats["total_notes"] == 1
+    assert stats["by_type"] == {"concept": 1}
+
+
 def test_path_flag_matches_sibling_scripts(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -93,3 +115,18 @@ def test_path_flag_matches_sibling_scripts(tmp_path):
         result = _run(flag, str(vault), "--json")
         assert result.returncode == 0, (flag, result.stderr)
         assert _json_of(result)["total_notes"] == 1
+
+
+def test_entities_block_counts_every_entity_kind(tmp_path):
+    """#302: companies and tools have schemas since #286, but the stats only
+    counted people. `entities` counts every kind with a by-kind split, and
+    `people` keeps its old meaning for the consumers that read it."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for name, ntype in [("Ana", "person"), ("Bo", "person"), ("Acme", "company"),
+                        ("Hammer", "tool"), ("Plan", "project")]:
+        (vault / f"{name}.md").write_text(f"---\ntype: {ntype}\n---\nbody\n", encoding="utf-8")
+
+    stats = _json_of(_run("--path", str(vault), "--json"))
+    assert stats["entities"] == {"total": 4, "by_kind": {"person": 2, "company": 1, "tool": 1}}
+    assert stats["people"]["total"] == 2

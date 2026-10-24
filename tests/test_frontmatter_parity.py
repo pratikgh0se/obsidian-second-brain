@@ -20,6 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _bash import BASH
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
@@ -114,7 +116,7 @@ def test_the_canonical_parser_handles_the_awkward_cases():
 
 def _build(cwd=None):
     return subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "build.sh"), "--platform", "hermes"],
+        [BASH, str(REPO_ROOT / "scripts" / "build.sh"), "--platform", "hermes"],
         cwd=cwd or REPO_ROOT, capture_output=True, text=True, check=False,
     )
 

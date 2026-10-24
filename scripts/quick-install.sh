@@ -45,7 +45,10 @@ bash "$SKILL_HOME/install.sh"
 
 cat <<'NEXT'
 
-Installed. Two ways to finish:
+Installed. Choose a starting point:
+
+  Crew only, no Obsidian needed?
+    Restart Claude Code and type /crew setup. Pick ~/crew or an existing vault.
 
   Have a vault already?
     bash ~/.claude/skills/obsidian-second-brain/scripts/setup.sh "/path/to/your/vault"

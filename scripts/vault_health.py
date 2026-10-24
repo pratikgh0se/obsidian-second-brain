@@ -20,9 +20,15 @@ Optional per-vault config at `<vault>/.vault-config.json` extends the built-in
 exclude list (additive, never overrides the hardcoded EXCLUDE_DIRS):
     {
       "exclude-dirs":  ["_card-pool", "_candidates"],  # dir names anywhere in the tree
-      "exclude-paths": ["Archive/Backup"]              # vault-relative path prefixes
+      "exclude-paths": ["Archive/Backup"],             # vault-relative path prefixes
+      "rewrite_policy": "unattended",                  # opt out of the /obsidian-ingest
+                                                       # confirm-before-rewrite gate (#250)
+      "source_quality_policy": "silent"                # mute the speculation-only-sources
+                                                       # warning (#258); default is warn
     }
-A missing or malformed file is ignored silently. See VaultExcludes.
+A missing or malformed file is ignored silently. See VaultExcludes, and
+load_rewrite_policy and load_source_quality_policy for the keys that are not about
+exclusions.
 """
 
 import argparse
@@ -39,7 +45,7 @@ from pathlib import Path
 from pathlib import Path as _Path
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
-from vault_scan import BASE_EXCLUDE_DIRS  # noqa: E402
+from vault_scan import BASE_EXCLUDE_DIRS, embed_exclude_prefixes, is_embed_excluded  # noqa: E402
 
 TODAY = date.today()
 # Shared base, see scripts/vault_scan.py. This module owns the user-facing
@@ -101,6 +107,28 @@ def parse_tags(frontmatter: str) -> list:
     return [t.strip().strip('"\'').lower() for t in ALIAS_ITEM_RE.findall(block.group(1))]
 
 
+def _is_hidden(parts) -> bool:
+    """True for a path with a dot-prefixed component, which is not vault content.
+
+    The case that bit a real vault (#290): on a volume with no native extended
+    attributes (exFAT, FAT32, many SMB shares) macOS writes a small binary
+    `._<name>` companion beside every file it touches, to carry the xattrs the
+    filesystem cannot hold. `rglob("*.md")` matches `._Note.md`, so each
+    companion was parsed as a note and reported three times over - as an orphan,
+    as missing frontmatter, and as a same-title duplicate of the real note. On an
+    exFAT vault those findings outnumbered the real ones, and no
+    `.vault-config.json` key could suppress them: `exclude-dirs` matches
+    directory names and `exclude-paths` matches prefixes. Deleting them does not
+    help either, because macOS writes them again on the next save.
+
+    Dot-prefixed generally, not `._` specifically, because that is the rule
+    Obsidian itself applies: it indexes no dot-prefixed file or folder. The
+    named dot-directories in BASE_EXCLUDE_DIRS stay listed there; this catches
+    the ones nobody thought to name.
+    """
+    return any(str(p).startswith(".") for p in parts)
+
+
 class VaultExcludes:
     """Additive, user-configured exclusions loaded from `<vault>/.vault-config.json`.
 
@@ -139,6 +167,8 @@ class VaultExcludes:
         # Casefolded: the bootstrapper writes Templates/ while three sibling
         # tools spelled it templates, so the same folder was skipped or scanned
         # depending on which tool ran.
+        if _is_hidden(parts):
+            return True
         lowered = [str(p).lower() for p in parts]
         if any(p in EXCLUDE_DIRS for p in lowered):
             return True
@@ -163,6 +193,8 @@ class VaultExcludes:
         template assets still resolve) and the user's noisy `exclude-dirs` are
         pruned here. User `exclude-paths` are deliberately NOT applied, so a live
         link into an excluded path still resolves instead of ringing as broken."""
+        if _is_hidden(parts):
+            return True
         if any(p in FILE_INDEX_EXCLUDE_DIRS for p in parts):
             return True
         return bool(self.dirs) and any(p in self.dirs for p in parts)
@@ -198,6 +230,49 @@ def load_vault_config(vault: Path) -> VaultExcludes:
     if isinstance(raw_link, list):
         link_scan = [g for g in raw_link if isinstance(g, str) and g]
     return VaultExcludes(dirs, paths, link_scan)
+
+
+REWRITE_POLICIES = ("confirm", "unattended")
+
+
+def load_rewrite_policy(vault: Path) -> str:
+    """Read `rewrite_policy` from `<vault>/.vault-config.json` (#250).
+
+    `confirm` (the default) keeps /obsidian-ingest's confirm-before-rewrite
+    gate; `unattended` lets the command write rewrites of existing notes
+    without asking. The opt-out is never inferred: a missing file, a missing
+    key, a malformed file, a non-string, or any other value all mean
+    `confirm`, the same missing-file contract as load_vault_config."""
+    cfg_path = vault / ".vault-config.json"
+    if not cfg_path.is_file():
+        return "confirm"
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "confirm"
+    if not isinstance(data, dict):
+        return "confirm"
+    value = data.get("rewrite_policy")
+    if isinstance(value, str) and value.strip().lower() == "unattended":
+        return "unattended"
+    return "confirm"
+
+
+def check_rewrite_policy(vault: Path) -> list:
+    """One info line when the vault runs without the rewrite gate, so a reader
+    of the health report knows rewrites land unreviewed by a person. Nothing
+    is reported for the default; there is nothing to fix either way."""
+    if load_rewrite_policy(vault) != "unattended":
+        return []
+    return [{
+        "type": "rewrite_policy",
+        "severity": "info",
+        "message": ("rewrite_policy: unattended - /obsidian-ingest rewrites existing "
+                    "notes without confirmation (#250); this vault reviews rewrites "
+                    "through its own layer, not a prompt. Remove the key from "
+                    ".vault-config.json to restore the default"),
+        "files": [".vault-config.json"],
+    }]
 
 
 # One `##` heading per canonical tag, its synonyms as a `-` list underneath -
@@ -528,6 +603,39 @@ def check_taxonomy(notes: dict, taxonomy: dict) -> list:
     return issues
 
 
+# Folders whose notes are a dated series or machine-written: nothing is expected
+# to link them, so an orphan finding here recurs every day forever in a vault
+# behaving exactly as documented.
+_ORPHAN_EXEMPT_FOLDERS = frozenset({
+    "daily", "dev logs", "logs", "boards", "templates", "reviews",
+    "life chapters", "private", "journal", "faith", "partner", "family",
+})
+
+
+def _orphan_exempt_folder(rel: str) -> bool:
+    """True when this note lives in a folder the orphan check should skip.
+
+    The old test read the top folder against a set of Obsidian-style names,
+    spelled with capitals. It therefore knew one of the two documented layouts
+    (#292): wiki-style daily notes sit at `wiki/daily/YYYY-MM-DD.md`, whose top
+    folder is `wiki`, so every one of them rang, while `Daily/YYYY-MM-DD.md` in
+    a vault next door did not. The same note was noise or not depending only on
+    which documented layout its owner picked. `Logs/`, the operations log
+    `/obsidian-init` writes and nothing is meant to link, was in neither list.
+
+    Wiki-style nests one level deeper under `wiki/`, per
+    `references/folder-map.md`, so the folder that decides this is the second
+    component there and the first everywhere else. Matching is casefolded, and
+    a slugged name (`wiki/life-chapters/`, which bootstrap writes for a preset
+    folder with no explicit mapping) reads as its spaced form.
+    """
+    parts = rel.lower().split("/")
+    if len(parts) < 2:
+        return False  # a note at the vault root is never exempt
+    head = parts[1] if parts[0] == "wiki" and len(parts) > 2 else parts[0]
+    return head.replace("-", " ").replace("_", " ") in _ORPHAN_EXEMPT_FOLDERS
+
+
 def check_orphans(notes: dict) -> list:
     # key -> set of source notes that link to it. Tracking the SOURCE matters:
     # a note's own links must not count as incoming (a self-link is the note
@@ -535,26 +643,44 @@ def check_orphans(notes: dict) -> list:
     # let a short stem like "ai" hide inside "detail" and never ring the alarm
     # (stress-test fix 8/24). Path-qualified links count via their basename.
     link_sources: dict[str, set] = defaultdict(set)
+    # Path-qualified links are kept apart. Folding them in by basename, which is
+    # what this used to do, made one link vouch for every note sharing a
+    # filename anywhere in the vault (#290): linking `[[wiki/daily/2026-01-05]]`
+    # hid `Logs/2026-01-05.md` from the scan, and one linked
+    # `projects/*/README.md` covered all the others.
+    path_link_sources: dict[str, set] = defaultdict(set)
     for src_rel, note in notes.items():
         for link in note["links"]:
             lk = _nfc(link).lower()
-            # An incoming link may carry the .md extension ([[note.md]]); it still
-            # targets the same note, so strip it before matching against stems.
+            # An incoming link may carry a redundant .md extension ([[note.md]]),
+            # so register the stripped form. Keep the link as written too: a note
+            # titled `... _CLAUDE.md` is saved as `... _CLAUDE.md.md`, and its stem
+            # keeps the trailing `.md`.
+            keys = {lk}
             if lk.endswith(".md"):
-                lk = lk[:-3]
-            for key in {lk, lk.replace(" ", "-"), lk.rsplit("/", 1)[-1]}:
-                link_sources[key].add(src_rel)
+                keys.add(lk[:-3])
+            target = path_link_sources if "/" in lk else link_sources
+            for key in keys | {k.replace(" ", "-") for k in keys}:
+                target[key].add(src_rel)
 
     def _has_incoming(rel: str, keys) -> bool:
-        return any(link_sources.get(k, set()) - {rel} for k in keys)
+        if any(link_sources.get(k, set()) - {rel} for k in keys):
+            return True
+        # A path-qualified link resolves to the note it points at, and Obsidian
+        # accepts the shortest path that is unique, so `[[alpha/README]]` reaches
+        # `projects/alpha/README.md`. Matched as a path suffix on a component
+        # boundary for that reason - never as a bare filename, which is the
+        # collision this separation exists to prevent.
+        rel_key = _nfc(rel[:-3] if rel.endswith(".md") else rel).lower()
+        return any(
+            (rel_key == pk or rel_key.endswith("/" + pk)) and (srcs - {rel})
+            for pk, srcs in path_link_sources.items()
+        )
 
     issues = []
-    skip_folders = {"Daily", "Dev Logs", "Boards", "Templates", "Life Chapters",
-                    "Private", "Journal", "Faith", "Reviews", "Partner", "Family"}
 
     for rel, note in notes.items():
-        top_folder = rel.split("/")[0] if "/" in rel else ""
-        if top_folder in skip_folders:
+        if _orphan_exempt_folder(rel):
             continue
         if rel in ("Home.md", "_CLAUDE.md"):
             continue
@@ -595,13 +721,21 @@ def check_stale_tasks(notes: dict) -> list:
     return issues
 
 
+# System files that carry no frontmatter by design. The same set, matched by
+# filename at any depth, that hooks/validate-ai-first.sh exempts at write time, so
+# a file the hook lets through is not reported here later.
+_FRONTMATTER_EXEMPT_FILES = frozenset({
+    "_CLAUDE.md", "Home.md", "index.md", "log.md", "catchup.md",
+})
+
+
 def check_missing_frontmatter(notes: dict) -> list:
     issues = []
     skip = {"Templates", "_trash", ".obsidian"}
     for rel, note in notes.items():
         if any(s in rel for s in skip):
             continue
-        if rel in ("Home.md", "_CLAUDE.md"):
+        if rel.rsplit("/", 1)[-1] in _FRONTMATTER_EXEMPT_FILES:
             continue
         if note.get("code_fence_wrapped"):
             # Reported by check_code_fence_wrapped instead. The frontmatter exists but is
@@ -711,6 +845,23 @@ _INDEX_KEY_RE = re.compile(r'"((?:[^"\\]|\\.)+?\.md)"\s*:\s*\{')
 INDEX_STALE_PCT = 5.0
 
 
+def _decode_index_key(raw: str) -> str:
+    """One captured index key, as the path it names.
+
+    The capture is the body of a JSON string, so `json.loads` on it quoted is
+    the decoder - it is only called when there is an escape to resolve, which
+    keeps an all-ASCII index on the same fast path it had before. A malformed
+    escape is left alone: an unreadable key should read as one missing note,
+    never as a crashed health check.
+    """
+    if "\\" not in raw:
+        return raw
+    try:
+        return json.loads(f'"{raw}"')
+    except json.JSONDecodeError:
+        return raw
+
+
 def _indexed_paths(index_path: Path, chunk: int = 1 << 20) -> set:
     """Note paths present in the semantic index, read as a stream.
 
@@ -721,13 +872,20 @@ def _indexed_paths(index_path: Path, chunk: int = 1 << 20) -> set:
 
     `chunk` is a parameter only so the seam behaviour can be tested deterministically
     at a small size; at the default a note key cannot span two boundaries.
+
+    Keys are decoded as JSON strings before they are returned (#259). Scanning
+    text rather than parsing it means a `\\uXXXX` escape arrives here verbatim,
+    and an index written by any build before the writer switched to
+    `ensure_ascii=False` stores every non-ASCII path that way - so a Cyrillic or
+    CJK note read out of it never matched its own vault path and was reported
+    missing from an index that held it.
     """
     found = set()
     tail = ""
     with index_path.open("r", encoding="utf-8", errors="replace") as fh:
         while block := fh.read(chunk):
             buf = tail + block
-            found.update(m.group(1) for m in _INDEX_KEY_RE.finditer(buf))
+            found.update(_decode_index_key(m.group(1)) for m in _INDEX_KEY_RE.finditer(buf))
             tail = buf[-4096:]
     return found
 
@@ -754,17 +912,22 @@ def check_semantic_index(vault: Path, notes) -> list:
                         "semantic search is falling back to literal word match"),
             "files": [],
         }]
-    missing = sorted(rel for rel in notes if rel not in indexed)
+    # Notes OBSIDIAN_EMBED_EXCLUDE keeps out of the index are not missing from it:
+    # the build skips them on purpose and the rebuild this warning recommends
+    # would skip them again, so counting them made the warning permanent (#273).
+    prefixes = embed_exclude_prefixes()
+    expected = [rel for rel in notes if not is_embed_excluded(rel, prefixes)]
+    missing = sorted(rel for rel in expected if rel not in indexed)
     if not missing:
         return []
-    pct = 100.0 * len(missing) / len(notes)
+    pct = 100.0 * len(missing) / len(expected)
     if pct < INDEX_STALE_PCT:
         return []
     return [{
         "type": "semantic_index",
         "severity": "warning",
         "message": (
-            f"Semantic index covers {len(notes) - len(missing)} of {len(notes)} notes; "
+            f"Semantic index covers {len(expected) - len(missing)} of {len(expected)} notes; "
             f"{len(missing)} ({pct:.0f}%) are missing and can only be found by literal "
             f"word match. Rebuild: uv run python scripts/eval/semantic_search.py "
             f'--path "{vault}" --build'
@@ -931,8 +1094,15 @@ def check_wanted_notes(notes: dict, vault: Path, excludes=None) -> list:
                 or link_dash_norm in all_files
             )
             if not resolved:
-                potential_folder = vault / link
-                if not potential_folder.is_dir():
+                # A "link" longer than the filesystem allows for a name (inline
+                # script in a captured page, `[[null,null,...]]`) makes is_dir()
+                # raise OSError before Python 3.14, which aborted the scan for the
+                # whole vault (#272). A path that cannot exist is not a folder.
+                try:
+                    is_folder = (vault / link).is_dir()
+                except OSError:
+                    is_folder = False
+                if not is_folder:
                     is_asset = link_name.lower().endswith(_ASSET_SUFFIXES)
                     issues.append({
                         "type": "missing_attachment" if is_asset else "wanted_note",
@@ -946,6 +1116,240 @@ def check_wanted_notes(notes: dict, vault: Path, excludes=None) -> list:
                         ),
                         "files": [rel],
                     })
+    return issues
+
+
+# --- source-payload completeness (#194) --------------------------------------
+# A source card can carry a live `source_url`, pass every structural check, and
+# still retain no evidence at all. The three checks below are about that gap
+# only; none of them judges how long a source ought to be.
+_FM_FIELD_RE_CACHE: dict = {}
+SOURCE_CAPTURE_SCOPES = ("full-local", "bounded-local", "url-only")
+# Deliberately tiny. This is not an opinion about how much text a source should
+# hold - a captured tweet is legitimately three lines. It is the floor at which
+# "I retained this content locally" is self-evidently untrue.
+MIN_RETAINED_PAYLOAD_CHARS = 50
+
+
+def _fm_field(frontmatter: str, field: str) -> str:
+    """One scalar frontmatter value, lowercased and unquoted, or ""."""
+    rx = _FM_FIELD_RE_CACHE.get(field)
+    if rx is None:
+        rx = re.compile(rf"^{re.escape(field)}:\s*(.+?)\s*$", re.MULTILINE)
+        _FM_FIELD_RE_CACHE[field] = rx
+    m = rx.search(frontmatter)
+    return m.group(1).strip().strip("\"'").lower() if m else ""
+
+
+def load_source_policy(vault: Path) -> str:
+    """`source_policy` from `<vault>/.vault-config.json`: "default" or "strict-local".
+
+    Same contract as load_rewrite_policy (#250): a missing file, a missing key,
+    a malformed file or any other value all mean "default". Strict mode raises
+    the severity of an unretained source, it does not invent new findings.
+    """
+    cfg_path = vault / ".vault-config.json"
+    if not cfg_path.is_file():
+        return "default"
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "default"
+    if not isinstance(data, dict):
+        return "default"
+    value = data.get("source_policy")
+    if isinstance(value, str) and value.strip().lower() == "strict-local":
+        return "strict-local"
+    return "default"
+
+
+def _dependents_of(notes: dict, targets: set, skip: set) -> dict:
+    """{target: {notes in `notes` that link it}}, never counting a note in `skip`.
+
+    Same link indexing as check_orphans: match on the stem and its
+    path-qualified and hyphenated spellings. Shared by the payload and
+    source-quality checks so the two cannot drift apart."""
+    by_key: dict = defaultdict(set)
+    for rel in targets:
+        stem = _nfc(Path(rel).stem).lower()
+        for key in {stem, stem.replace(" ", "-"), rel[:-3].lower()}:
+            by_key[key].add(rel)
+    supported: dict = defaultdict(set)
+    for src_rel, note in notes.items():
+        if src_rel in skip:
+            continue
+        for link in note["links"]:
+            lk = _nfc(link).lower()
+            # Both forms, as in check_orphans: `... _CLAUDE.md.md` keeps its `.md`.
+            forms = {lk, lk[:-3]} if lk.endswith(".md") else {lk}
+            keys = set()
+            for f in forms:
+                keys |= {f, f.replace(" ", "-"), f.rsplit("/", 1)[-1]}
+            for key in keys:
+                for target in by_key.get(key, ()):
+                    supported[target].add(src_rel)
+    return supported
+
+
+def check_source_payload(notes: dict, vault: Path) -> list:
+    """Sources whose retained evidence does not match what they claim (#194).
+
+    Three distinct problems, deliberately separated because they carry very
+    different weight:
+
+    1. A note that declares it retained the content locally and has no body.
+       That is a self-contradiction inside one file, so it is an error and needs
+       no policy to justify it.
+    2. Active knowledge resting on a `url-only` record. The vault kept a
+       locator, not evidence: if the page dies or changes, the concept and
+       synthesis notes built on it have nothing behind them and nothing says so.
+       A warning, because keeping only a URL is a legitimate choice.
+    3. Sources with no `capture_scope` at all - every source written before this
+       field existed. Reported once, as info, never per note: a research vault
+       has thousands and a wall of findings would bury 1 and 2.
+
+    `source_policy: strict-local` raises 2 and 3 by one level for a vault that
+    has decided a locator is not a source.
+    """
+    strict = load_source_policy(vault) == "strict-local"
+    sources, unscoped, empty_claims = {}, [], []
+    for rel, note in notes.items():
+        if _fm_field(note["frontmatter"], "type") != "source":
+            continue
+        scope = _fm_field(note["frontmatter"], "capture_scope")
+        sources[rel] = scope
+        body = FRONTMATTER_RE.sub("", note["content"], count=1).strip()
+        if not scope:
+            unscoped.append(rel)
+        elif scope in ("full-local", "bounded-local") and len(body) < MIN_RETAINED_PAYLOAD_CHARS:
+            empty_claims.append((rel, scope, len(body)))
+
+    issues = []
+    for rel, scope, size in sorted(empty_claims):
+        issues.append({
+            "type": "source_payload",
+            "severity": "error",
+            "message": (f"declares capture_scope: {scope} but retains a {size}-character body - "
+                        "the note claims evidence it does not hold. Re-capture the source, or "
+                        "set capture_scope: url-only to say plainly that only the locator was kept"),
+            "files": [rel],
+        })
+
+    url_only = {rel for rel, scope in sources.items() if scope == "url-only"}
+    if url_only:
+        supported = _dependents_of(notes, url_only, skip=set(sources))
+        for rel in sorted(supported):
+            dependents = sorted(supported[rel])
+            shown = ", ".join(dependents[:5]) + ("..." if len(dependents) > 5 else "")
+            issues.append({
+                "type": "source_payload",
+                "severity": "error" if strict else "warning",
+                "message": (f"capture_scope: url-only, and {len(dependents)} note(s) rest on it "
+                            f"({shown}). The vault kept the locator, not the evidence: if the page "
+                            "changes or dies, nothing behind those claims can be re-read"),
+                "files": [rel] + dependents,
+            })
+
+    if unscoped:
+        issues.append({
+            "type": "source_payload",
+            "severity": "warning" if strict else "info",
+            "message": (f"{len(unscoped)} source note(s) have no capture_scope, so how much of each "
+                        "source was actually retained is unknown (e.g. "
+                        + ", ".join(sorted(unscoped)[:3])
+                        + "). Sources written before the field existed read this way; "
+                          "set full-local, bounded-local or url-only as you touch them"),
+            "files": sorted(unscoped),
+        })
+    return issues
+
+
+# --- source quality (#258) ---------------------------------------------------
+# `source_quality` says whether a source's provenance was worth building on.
+# It is orthogonal to `capture_scope` (how much was kept) and never a verdict on
+# truth. Spec: references/source-quality-check.md.
+SOURCE_QUALITY_VALUES = ("high", "medium", "speculation")
+SOURCE_QUALITY_POLICIES = ("warn", "silent")
+# Notes that record activity or navigate, rather than hold claims. A daily note
+# that says "captured [[x]] today" is not knowledge resting on x; reporting it
+# would be the nag that gets a check policy-toggled to silent within a week.
+_ACTIVITY_NOTE_TYPES = frozenset({
+    "daily", "log", "devlog", "index", "review", "learnings-review",
+    "agenda-snapshot", "task", "recurring-task",
+})
+_ACTIVITY_NOTE_FILES = frozenset({"index.md", "log.md", "catchup.md", "home.md"})
+
+
+def load_source_quality_policy(vault: Path) -> str:
+    """`source_quality_policy` from `<vault>/.vault-config.json`: "warn" or "silent".
+
+    Same never-inferred contract as load_rewrite_policy (#250): a missing file,
+    a missing key, a malformed file, a non-string or any other value all mean
+    "warn". There is deliberately no value that blocks a capture."""
+    cfg_path = vault / ".vault-config.json"
+    if not cfg_path.is_file():
+        return "warn"
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "warn"
+    if not isinstance(data, dict):
+        return "warn"
+    value = data.get("source_quality_policy")
+    if isinstance(value, str) and value.strip().lower() == "silent":
+        return "silent"
+    return "warn"
+
+
+def check_source_quality(notes: dict, vault: Path) -> list:
+    """Active knowledge whose every cited source is `speculation` grade (#258).
+
+    A note is reported only when it links at least one source AND every source
+    it links carries a recognised `source_quality` of `speculation`. A source
+    with no field is unjudged, not speculative, so one unlabelled source in the
+    mix keeps the note quiet: this check never turns "not yet labelled" into a
+    finding, which is what makes it safe on a vault written before the field.
+    Daily, log, index and other activity notes are skipped: they record that a
+    source was captured, they do not rest on it.
+    A warning, because a speculative source is a legitimate thing to have read.
+    """
+    if load_source_quality_policy(vault) == "silent":
+        return []
+    graded = {}
+    for rel, note in notes.items():
+        if _fm_field(note["frontmatter"], "type") != "source":
+            continue
+        # Drop a trailing `# high | medium | ...` template comment first, then the
+        # quotes: stripping quotes first leaves `speculation"` for a quoted value.
+        m = re.search(r"^source_quality:\s*(.+?)\s*$", note["frontmatter"], re.MULTILINE)
+        grade = m.group(1).split("#", 1)[0].strip().strip("\"'").lower() if m else ""
+        if grade in SOURCE_QUALITY_VALUES:
+            graded[rel] = grade
+    speculative = {rel for rel, grade in graded.items() if grade == "speculation"}
+    if not speculative:
+        return []
+    all_sources = {rel for rel, n in notes.items() if _fm_field(n["frontmatter"], "type") == "source"}
+    by_note: dict = defaultdict(set)
+    for source, dependents in _dependents_of(notes, all_sources, skip=all_sources).items():
+        for dep in dependents:
+            by_note[dep].add(source)
+    issues = []
+    for dep in sorted(by_note):
+        if (_fm_field(notes[dep]["frontmatter"], "type") in _ACTIVITY_NOTE_TYPES
+                or Path(dep).name.lower() in _ACTIVITY_NOTE_FILES):
+            continue
+        cited = by_note[dep]
+        if cited and all(src in speculative for src in cited):
+            shown = ", ".join(sorted(cited)[:3]) + ("..." if len(cited) > 3 else "")
+            issues.append({
+                "type": "source_quality",
+                "severity": "warning",
+                "message": (f"{dep} cites only speculation-grade sources ({shown}). Their "
+                            "provenance is unknown, derived or conflicting: corroborate the "
+                            "claims with a better source, or say plainly in the note that "
+                            "they are unverified"),
+                "files": [dep] + sorted(cited),
+            })
     return issues
 
 
@@ -995,7 +1399,10 @@ def run_health_check(vault: Path) -> dict:
         ("Missing attachments",
          [i for i in link_gaps if i["type"] == "missing_attachment"]),
         ("Template leftovers", check_template_leftovers(notes)),
+        ("Source payload", check_source_payload(notes, vault)),
+        ("Source quality", check_source_quality(notes, vault)),
         ("Semantic index coverage", check_semantic_index(vault, notes)),
+        ("Rewrite policy", check_rewrite_policy(vault)),
     ]
 
     all_issues = []

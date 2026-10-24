@@ -139,3 +139,17 @@ def test_post_write_failures_are_reported_never_raised(vault, monkeypatch, tmp_p
     monkeypatch.setenv("OBSIDIAN_POST_WRITE_CMD", "no-such-command-xyz")
     res = ops.capture_idea("post-write missing")
     assert res["post_write"]["ran"] is False and "command not found" in res["post_write"]["detail"], res
+
+
+def test_post_write_cmd_split_strips_windows_quotes(vault):
+    """On Windows, non-POSIX shlex keeps the quote marks, so a quoted
+    interpreter path reached subprocess as '"C:\\...\\python.exe"' and was
+    never found. Found by the Windows CI job; this pins the split on any OS."""
+    _, ops = vault
+    cmd = r'"C:\Program Files\Python\python.exe" "C:\hooks\post write.py" --flag'
+    assert ops._split_post_write_cmd(cmd, windows=True) == [
+        r"C:\Program Files\Python\python.exe", r"C:\hooks\post write.py", "--flag",
+    ]
+    assert ops._split_post_write_cmd('"/usr/bin/python3" "/tmp/a b.py"', windows=False) == [
+        "/usr/bin/python3", "/tmp/a b.py",
+    ]

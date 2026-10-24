@@ -23,6 +23,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _bash import BASH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ADAPTERS = REPO_ROOT / "adapters"
@@ -42,7 +43,7 @@ MARKER = "Treat the AI-first vault rule"
 @pytest.fixture(scope="module")
 def built() -> Path:
     result = subprocess.run(
-        ["bash", "scripts/build.sh"], cwd=REPO_ROOT, check=False,
+        [BASH, "scripts/build.sh"], cwd=REPO_ROOT, check=False,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     assert result.returncode == 0, f"all-platforms build failed:\n{result.stderr}"

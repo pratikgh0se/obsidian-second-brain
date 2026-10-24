@@ -87,3 +87,63 @@ def test_build_names_fully_dropped_notes(tmp_path, monkeypatch, capsys):
     assert "doomed.md" not in index["notes"]
     err = capsys.readouterr().err
     assert "DROPPED - not findable semantically] doomed.md" in err
+
+
+# --------------------------------------------------------------------------- #
+# Per-note embedding cap is configurable (OBSIDIAN_EMBED_MAX_CHUNKS)
+# --------------------------------------------------------------------------- #
+
+
+def _reload_semantic_search():
+    import importlib
+
+    import semantic_search
+
+    return importlib.reload(semantic_search)
+
+
+def test_max_chunks_defaults_to_eight(monkeypatch):
+    """The cap is deliberate; the default must not drift."""
+    monkeypatch.delenv("OBSIDIAN_EMBED_MAX_CHUNKS", raising=False)
+    assert _reload_semantic_search()._MAX_CHUNKS == 8
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("64", 64), ("1", 1), (" 32 ", 32),
+        ("", 8),  # empty falls back to the default, as elsewhere in the codebase
+    ],
+)
+def test_max_chunks_env_override(monkeypatch, value, expected):
+    monkeypatch.setenv("OBSIDIAN_EMBED_MAX_CHUNKS", value)
+    try:
+        assert _reload_semantic_search()._MAX_CHUNKS == expected
+    finally:
+        monkeypatch.delenv("OBSIDIAN_EMBED_MAX_CHUNKS", raising=False)
+        _reload_semantic_search()
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "eight", "8.5", "  "])
+def test_a_bad_max_chunks_falls_back_loudly_instead_of_corrupting_the_index(
+    monkeypatch, capsys, value
+):
+    """The cap is applied as a slice, so a bad value fails silently.
+
+    `0` embeds nothing and the note is dropped from the index as unembeddable;
+    `-1` quietly drops the last chunk of every long note; a non-integer used to
+    raise ValueError at import and take the whole build down with a traceback.
+    All three look like a working build to whoever set the variable, which is
+    the worst shape for a knob whose only symptom is a note that can no longer
+    be found.
+    """
+    monkeypatch.setenv("OBSIDIAN_EMBED_MAX_CHUNKS", value)
+    try:
+        assert _reload_semantic_search()._MAX_CHUNKS == 8
+        if value.strip():
+            assert "OBSIDIAN_EMBED_MAX_CHUNKS" in capsys.readouterr().err, (
+                "the fallback is silent, so a typo looks like a working build"
+            )
+    finally:
+        monkeypatch.delenv("OBSIDIAN_EMBED_MAX_CHUNKS", raising=False)
+        _reload_semantic_search()

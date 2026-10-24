@@ -18,7 +18,7 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
-from note_io import read_exact, write_exact
+from note_io import NoteChangedError, read_exact, write_exact_if_unchanged
 from vault_health import check_wanted_notes, load_vault, load_vault_config, replace_outside_code
 
 LINK_IN_MSG = re.compile(r"\[\[(.+?)\]\]")
@@ -102,7 +102,15 @@ def apply_verdicts(vault, verdicts, create_cap):
             # inline code is example text the counter never reported.
             new_text, n = replace_outside_code(text, f"[[{link}]]", link)
             if n:
-                write_exact(path, new_text)
+                try:
+                    write_exact_if_unchanged(path, new_text, text)
+                except NoteChangedError:
+                    # Another writer got there first (#217). Its edit is on disk
+                    # and this one is not; overwriting would drop theirs with no
+                    # trace, so the link is left for the next run.
+                    print(f"  SKIPPED (changed on disk during triage): {rel}")
+                    skipped += 1
+                    continue
                 deleted += 1
         elif v == "CREATE" and link not in seen_create and created < create_cap:
             seen_create.add(link)

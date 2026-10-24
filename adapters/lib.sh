@@ -343,6 +343,21 @@ copy_scripts_with_project() {
   mkdir -p "$dst"
   cp -R "$src/." "$dst/"
   cp "$src/../pyproject.toml" "$(dirname "$dst")/pyproject.toml"
+  copy_vault_ops "$src/.." "$(dirname "$dst")"
+}
+
+# copy_vault_ops <src-root> <dst-root>
+# scripts/ imports vault_ops from integrations/obsidian-mcp-server/ beside it:
+# the research vault scan (scripts/research/lib/vault_terms.py) and the eval
+# scripts. A build that ships scripts/ without it crashes /research-deep and
+# /notebooklm with ModuleNotFoundError (#332). Same relative path, so the
+# imports resolve unchanged; vault_ops needs only stdlib and scripts/osb_env.py.
+copy_vault_ops() {
+  local src="$1/integrations/obsidian-mcp-server/vault_ops.py"
+  local dst="$2/integrations/obsidian-mcp-server"
+  [[ -f "$src" ]] || return 0
+  mkdir -p "$dst"
+  cp "$src" "$dst/vault_ops.py"
 }
 
 # copy_references_rewritten <src-refs-dir> <dst-refs-dir> <platform_dir>

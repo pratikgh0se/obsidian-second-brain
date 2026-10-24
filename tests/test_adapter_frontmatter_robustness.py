@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _bash import BASH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIB = REPO_ROOT / "adapters" / "lib.sh"
@@ -30,7 +31,7 @@ LIB = REPO_ROOT / "adapters" / "lib.sh"
 def _call(fn: str, path: Path, *args: str) -> str:
     """Invoke one lib.sh helper in isolation."""
     cmd = f'source "{LIB}"; {fn} "{path}" {" ".join(args)}'
-    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, check=False)
+    result = subprocess.run([BASH, "-c", cmd], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     return result.stdout
 

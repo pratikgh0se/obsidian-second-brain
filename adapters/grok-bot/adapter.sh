@@ -74,8 +74,13 @@ _grok_emit_skills() {
       printf 'description: "%s"\n' "${desc//\"/\\\"}"
       echo "---"
       echo
-      _grok_preamble
-      _grok_rewrite_command_body "$f"
+      if [[ "$name" == "crew" ]]; then
+        # Crew needs a Python runner and shared folder, not the vault MCP.
+        command_body "$f" | sed 's|SKILL_ROOT|skills/obsidian-core|g'
+      else
+        _grok_preamble
+        _grok_rewrite_command_body "$f"
+      fi
       echo
       echo "---"
       echo
@@ -91,6 +96,10 @@ _grok_emit_skills() {
     # Rewrite bare references/ paths to .agents/skills/obsidian-core/references/
     # (the perl adds the leading dot, so pass without it)
     rewrite_platform_paths "$out" "agents/skills/obsidian-core"
+    if [[ "$name" == "crew" ]]; then
+      # The Grok tree is installed as skills/, not .agents/skills/.
+      perl -i -pe 's|\.agents/skills/obsidian-core/|skills/obsidian-core/|g' "$out"
+    fi
   done
 }
 
@@ -179,6 +188,7 @@ _grok_emit_core() {
   if [[ -d "$src/scripts" ]]; then
     mkdir -p "$dst/scripts"
     cp -R "$src/scripts/." "$dst/scripts/"
+    copy_vault_ops "$src" "$dst"  # see adapters/lib.sh (#332)
   fi
   [[ -f "$src/pyproject.toml" ]] && cp "$src/pyproject.toml" "$dst/pyproject.toml"
 

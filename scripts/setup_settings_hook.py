@@ -12,13 +12,33 @@ valid JSON it prints a manual instruction and exits 0 rather than clobbering the
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 # The hook is registered at the canonical skill-install location (a symlink or a direct
 # clone that install.sh sets up), not the repo clone path, so it stays valid if the repo
 # lives elsewhere. The hook resolves its own real path at runtime, so this is enough.
-HOOK_PATH = Path.home() / ".claude" / "skills" / "obsidian-second-brain" / "hooks" / "load_vault_context.py"
-HOOK_CMD = f"python3 {HOOK_PATH}"
+# The .sh wrapper, not the .py. `python3` is the Microsoft Store App Execution
+# Alias on a stock Windows install: it exists, prints nothing, exits non-zero, so
+# the hook injected nothing and said nothing (#269). The wrapper resolves an
+# interpreter that runs before handing over.
+HOOK_PATH = Path.home() / ".claude" / "skills" / "obsidian-second-brain" / "hooks" / "load_vault_context.sh"
+
+
+def hook_command(path: Path) -> str:
+    """The hook command as the shell that runs it will read it.
+
+    Claude Code hands a command hook to a shell, Git Bash on Windows. str(path) is
+    C:\\Users\\... there, and Git Bash reads every backslash as an escape, so the hook
+    failed with "No such file or directory" at every session start (#281); an unquoted
+    path with a space splits in two on any platform. Forward slashes run in Git Bash, and
+    shlex.quote leaves an ordinary POSIX path exactly as str() wrote it, so an entry
+    registered on macOS or Linux before this change still reads as unchanged.
+    """
+    return shlex.quote(path.as_posix())
+
+
+HOOK_CMD = hook_command(HOOK_PATH)
 
 
 def register(settings: dict) -> tuple[dict, str]:
@@ -27,7 +47,10 @@ def register(settings: dict) -> tuple[dict, str]:
     session_start = hooks.setdefault("SessionStart", [])
     for group in session_start:
         for h in group.get("hooks", []):
-            if "load_vault_context.py" in h.get("command", ""):
+            # Matched without the extension so an entry registered before #269
+            # (`python3 <...>/load_vault_context.py`) is found and rewritten, not
+            # left in place next to a second, working one.
+            if "load_vault_context" in h.get("command", ""):
                 if h["command"] == HOOK_CMD:
                     return settings, "unchanged"
                 h["command"] = HOOK_CMD

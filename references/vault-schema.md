@@ -1,6 +1,8 @@
 # Vault Schema Reference
 
-## Default: Wiki-Style (LLM-First)
+Two layouts are supported. `scripts/bootstrap_vault.py` builds the Obsidian-style layout by default and the wiki-style one with `--style wiki`.
+
+## Wiki-Style (LLM-First)
 
 Optimized for vaults where Claude does most or all of the writing. The primary reader is the LLM, not the human. Obsidian is the storage engine; Claude is the interface.
 
@@ -41,7 +43,49 @@ Your Vault/
 
 ---
 
-## Alternative: Obsidian-Style (Human-First)
+## First-Brain wiki-style variant
+
+An optional wiki-style layout for an existing, evolving collection of human notes. Select it through `/obsidian-init`; an existing `First-Brain/` prompts an offer, not an automatic layout switch. Initialization ensures `First-Brain/` exists and creates the wiki output directories without moving personal notes or ingesting them.
+
+```text
+Vault/
+├── First-Brain/          # Human-maintained sources, including future descendants
+├── raw/                 # Immutable snapshots of ingested source versions
+├── wiki/
+│   ├── entities/        # People, companies, tools
+│   ├── concepts/        # Ideas, frameworks, synthesis
+│   ├── projects/
+│   ├── meetings/
+│   ├── decisions/       # Decisions and conflict records
+│   ├── tasks/           # Tasks and recurring obligations
+│   ├── daily/
+│   ├── logs/            # Dev/work logs, distinct from operation logs
+│   ├── reviews/
+│   └── agenda/
+├── boards/              # AI-maintained kanban boards
+├── Research/
+├── Logs/                # Append-only agent operation logs
+├── Bases/
+├── _CLAUDE.md
+├── index.md
+└── log.md               # Pointer to operation logs
+```
+
+### Ownership and initialization
+
+- **First Brain:** the human owns and edits the originals. Agents read eligible notes but never change their bytes or paths, add generated notes there, or convert them to AI-first format. Sensitive-content permissions apply before reading and before copying source content into the knowledge layer.
+- **Raw captures:** ingestion saves the source version under `raw/`, classified by content (a meeting may use `raw/transcripts/`; an article uses `raw/articles/`). Earlier captures remain immutable.
+- **Second Brain:** agents create and consolidate knowledge under the wiki routes. Existing derived notes and structural files retain the current rewrite approval policy.
+- **Infrastructure:** existing configuration and tooling stay at the root. Initialization preserves manual content through its existing review rules. Moving personal folders into First Brain is an explicit user task, never an automatic migration.
+- **Protection:** `_CLAUDE.md` instructions govern agent behavior; this is instruction-based protection, not a hard filesystem sandbox. It does not restrict all retrieval to the wiki or enforce read permissions in search/index tools.
+
+Every vault-writing command must honor the **First Brain Protection** section in `_CLAUDE.md`, including `/obsidian-reconcile`, `/obsidian-synthesize`, `/obsidian-health` fixes, and background agents. Protection applies beyond initialization and ingestion. These other workflows receive the rules through the generated manual; this variant does not add a technical write guard to each command. Pass the same rules to any subagents.
+
+Initialization is performed by the agent following `commands/obsidian-init.md`, using filesystem tools to create missing directories and `references/folder-map.md` to resolve destinations. The command remains the source of truth for initialization, Bases, logging, and preservation of existing manuals; no dedicated initialization script is required for this variant.
+
+---
+
+## Obsidian-Style (Human-First)
 
 For users who browse their vault daily in Obsidian. Folders are organized for human spatial memory.
 
@@ -83,7 +127,7 @@ Your Vault/
 | Wiki-style | Obsidian-style | What lives here |
 |---|---|---|
 | `raw/articles/` | `Knowledge/` | Original source material |
-| `wiki/entities/` | `People/` + `Jobs/` + `Businesses/` | People, companies, tools |
+| `wiki/entities/` | `People/` + `Companies/` + `Tools/` + `Businesses/` | People, companies, tools. `Companies/` holds companies the vault tracks; `Businesses/` holds companies the vault owner owns |
 | `wiki/concepts/` | `Ideas/` + `Learning/` | Ideas, frameworks, methodologies |
 | `wiki/projects/` | `Projects/` | Active and archived projects |
 | `wiki/daily/` | `Daily/` | Daily notes |
@@ -146,9 +190,8 @@ due: 2026-03-28
 ```yaml
 ---
 date: 2026-03-24
-tags:
-  - entity
-  - person       # or: company, tool
+type: person                    # or: company, tool (schemas in references/ai-first-rules.md)
+tags: [person]
 role: "Senior Engineer"        # current role
 company: "[[Acme Corp]]"       # current company
 last_interaction: 2026-03-24
@@ -164,6 +207,8 @@ timeline:                       # bi-temporal facts - never delete, only append
     source: "[[2026-04-07]]"    # where the vault learned it from
 ---
 ```
+
+`type` tells people, companies and tools apart, as it does for every other note kind, and each has its schema in `references/ai-first-rules.md`. `role:` and `company:` are person fields; `timeline:` applies to all three.
 
 **Bi-temporal facts rule:** never overwrite a role, company, status, or location. Add a new entry to `timeline:` with:
 - `from` / `until` - **event time**: when the fact was true in reality
@@ -186,6 +231,7 @@ tags:
   - source
 source_type: article   # article | transcript | pdf | video
 source_url: "https://..."
+source_path: ""       # optional local original, e.g. First-Brain/Meetings/Discussion.md
 content_hash: ""       # first 16 hex of SHA-256 over the canonical text (see /obsidian-ingest step 5); drift detection
 ---
 ```
@@ -278,7 +324,7 @@ LIMIT 7
 ### All entities (people, companies, tools)
 ```dataview
 TABLE role, company, last_interaction FROM "wiki/entities"
-WHERE contains(tags, "entity")
+WHERE contains(list("person", "company", "tool"), type)
 SORT last_interaction DESC
 ```
 

@@ -26,13 +26,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Load the same optional .env the paid config uses, but never require it.
+# scripts/osb_env.py owns where that file is; spelling it out again here is how
+# OBSIDIAN_ENV_FILE ends up meaning two different things in one toolkit.
 try:
+    import sys
+
     from dotenv import load_dotenv
 
-    _ENV_PATH = Path(
-        os.environ.get("OBSIDIAN_ENV_FILE")
-        or (Path.home() / ".config" / "obsidian-second-brain" / ".env")
-    ).expanduser()
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    import osb_env
+
+    _ENV_PATH = osb_env.env_file()
     load_dotenv(_ENV_PATH)
 except Exception:
     pass

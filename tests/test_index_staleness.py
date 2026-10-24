@@ -108,6 +108,109 @@ def test_the_check_is_wired_into_the_health_run(vault):
     assert result["counts"]["Semantic index coverage"] == 1
 
 
+def test_notes_excluded_from_embedding_are_not_reported_missing(vault, monkeypatch):
+    """#273: OBSIDIAN_EMBED_EXCLUDE keeps a folder out of the index on purpose.
+    Counting those notes as missing made the warning permanent, because the
+    rebuild it recommends skips them again."""
+    (vault / "Private").mkdir()
+    for i in range(10):
+        (vault / "Private" / f"secret{i}.md").write_text(
+            "---\ntype: note\n---\n\nx\n", encoding="utf-8"
+        )
+    notes = vh.load_vault(vault)
+    _index(vault, [r for r in notes if not r.startswith("Private/")])
+
+    monkeypatch.setenv("OBSIDIAN_EMBED_EXCLUDE", "Private/")
+    assert vh.check_semantic_index(vault, notes) == []
+
+    monkeypatch.delenv("OBSIDIAN_EMBED_EXCLUDE")
+    assert len(vh.check_semantic_index(vault, notes)) == 1, "without the exclude the gap is real"
+
+
+def test_an_exclude_does_not_mask_a_real_gap(vault, monkeypatch):
+    """Coverage is measured over the notes the index should hold, so a stale index
+    still rings when an exclude is set, and the excluded note is not listed."""
+    (vault / "Private").mkdir()
+    (vault / "Private" / "secret.md").write_text("---\ntype: note\n---\n\nx\n", encoding="utf-8")
+    notes = vh.load_vault(vault)
+    _index(vault, [r for r in notes if not r.startswith("Private/")][:10])
+
+    monkeypatch.setenv("OBSIDIAN_EMBED_EXCLUDE", "Private/")
+    issues = vh.check_semantic_index(vault, notes)
+    assert len(issues) == 1
+    assert "10 of 20" in issues[0]["message"], issues[0]["message"]
+    assert "Private/secret.md" not in issues[0]["files"]
+
+
+# --- non-ASCII note paths (#259) ---------------------------------------------
+
+CYRILLIC = "Архитектура/Тестовая заметка.md"
+CJK = "知識/テストノート.md"
+
+
+@pytest.fixture()
+def non_ascii_vault(tmp_path):
+    v = tmp_path / "vault"
+    for rel in (CYRILLIC, CJK):
+        path = v / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\ntype: note\n---\n\n## For future agent\nbody\n", encoding="utf-8")
+    return v
+
+
+def test_an_escaped_index_still_reports_full_coverage(non_ascii_vault):
+    """#259: a vault of Cyrillic titles was told 54% of it was unindexed.
+
+    json.dumps escapes non-ASCII by default, and the coverage reader scans the
+    index as text rather than parsing it, so an escaped key never matched the
+    path it names. The build now writes unescaped, but every index built before
+    that is still on disk - and a false "296 notes missing" is a rebuild of a
+    26MB index for nothing. The reader decodes, so both shapes report the truth.
+    """
+    notes = vh.load_vault(non_ascii_vault)
+    assert set(notes) == {CYRILLIC, CJK}, "the fixture is not exercising non-ASCII paths"
+
+    payload = {"format": 2, "model": "bge-m3",
+               "notes": {r: {"title": Path(r).stem, "vecs": [[0.1]]} for r in notes}}
+    index = non_ascii_vault / vh.SEMANTIC_INDEX_FILE
+
+    index.write_text(json.dumps(payload), encoding="utf-8")  # escaped, the old writer
+    assert "\\u" in index.read_text(encoding="utf-8"), "fixture is not escaped"
+    assert vh._indexed_paths(index) == set(notes)
+    assert vh.check_semantic_index(non_ascii_vault, notes) == []
+
+    index.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert vh._indexed_paths(index) == set(notes)
+    assert vh.check_semantic_index(non_ascii_vault, notes) == []
+
+
+def test_a_genuinely_missing_non_ascii_note_is_still_reported(non_ascii_vault):
+    """The decode must not paper over a real gap."""
+    notes = vh.load_vault(non_ascii_vault)
+    payload = {"format": 2, "model": "bge-m3",
+               "notes": {CYRILLIC: {"title": "x", "vecs": [[0.1]]}}}
+    (non_ascii_vault / vh.SEMANTIC_INDEX_FILE).write_text(
+        json.dumps(payload), encoding="utf-8")
+    issues = vh.check_semantic_index(non_ascii_vault, notes)
+    assert len(issues) == 1 and CJK in issues[0]["files"]
+
+
+def test_a_malformed_escape_costs_one_note_not_the_health_check():
+    """An unreadable key reads as one missing note, never as a traceback."""
+    assert vh._decode_index_key(r"Notes/\q broken.md") == r"Notes/\q broken.md"
+    assert vh._decode_index_key("Plain/Note.md") == "Plain/Note.md"
+
+
+def test_the_index_writer_does_not_escape_non_ascii_paths():
+    """The other half of #259: every other JSON writer in the repo already
+    passes ensure_ascii=False, and this one being the outlier is what put the
+    escapes on disk."""
+    src = (REPO_ROOT / "scripts" / "eval" / "semantic_search.py").read_text(encoding="utf-8")
+    assert "json.dumps(out, ensure_ascii=False)" in src, (
+        "the semantic index is written with escaped non-ASCII paths again"
+    )
+
+
 # --- the streaming reader ---------------------------------------------------
 
 def test_keys_split_across_a_read_boundary_are_still_found(vault):

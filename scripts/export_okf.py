@@ -10,9 +10,16 @@ YAML frontmatter" - a vendor-neutral way to hand a knowledge corpus to any AI ag
 An obsidian-second-brain vault is already ~90% OKF; this emits a compliant bundle so the
 vault "speaks the standard" without changing how it works natively.
 
+Targets OKF v0.2 (published 2026-07-25), which supersedes v0.1 in two breaking ways:
+a concept's production time moved from `timestamp` to `generated: {by, at}`, and
+provenance moved from a body `# Citations` list to a frontmatter `sources` list.
+v0.2 also adds optional lifecycle fields; this exporter emits only the ones the
+vault actually knows, because a guessed lifecycle is worse than an absent one.
+
 What it does, per note:
   - frontmatter -> OKF fields: `type` (required), `title`, `description`, `resource`
-    (only if the note actually has a source/url), `tags`, `timestamp` (ISO-8601)
+    (only if the note actually has a source/url), `tags`, `generated: {by, at}`,
+    plus `status` and `sources` where the vault has them
   - `[[wikilinks]]` -> relative-path markdown links (OKF's cross-link convention);
     unresolved links degrade to plain text, embeds (`![[x]]`) keep a relative path
   - the full AI-first body (incl. the `## For future agent` preamble) is preserved -
@@ -63,6 +70,17 @@ from vault_scan import BASE_EXCLUDE_DIRS, EXPORT_ONLY_EXCLUDES  # noqa: E402
 SKIP_DIRS = frozenset(d.lower() for d in (*BASE_EXCLUDE_DIRS, *EXPORT_ONLY_EXCLUDES))
 # frontmatter fields that point at a real external asset -> OKF `resource`
 RESOURCE_KEYS = ("resource", "url", "source_url", "post-url", "post_url", "repo", "linkedin")
+# `generated.by` names the actor that produced the concept file (OKF v0.2).
+GENERATED_BY = "obsidian-second-brain"
+# OKF v0.2 `status` is `draft | stable | deprecated`, defaulting to stable. Only
+# vault statuses that mean "this knowledge no longer holds" map to deprecated.
+# `done`, `closed`, `parked` and `inactive` deliberately do NOT: a finished
+# project is completed knowledge, not withdrawn knowledge, and exporting it as
+# deprecated would tell every downstream consumer to discount a true record.
+DEPRECATED_STATUSES = frozenset({
+    "superseded", "obsolete", "archived", "rejected", "declined", "cancelled",
+})
+DRAFT_STATUSES = frozenset({"draft", "wip"})
 
 
 def _skipped(parts) -> bool:
@@ -145,6 +163,25 @@ def to_iso(fm, src_file):
         return f"{ds}T00:00:00Z"
     mtime = datetime.datetime.fromtimestamp(src_file.stat().st_mtime, datetime.timezone.utc)
     return mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def okf_status(fm, ntype):
+    """OKF v0.2 `status`, or None to let the spec's `stable` default stand.
+
+    Emitted only where the vault states it plainly: a note retired by
+    /obsidian-merge is deprecated by construction, and a status this project
+    already treats as withdrawn maps across. Everything else is omitted rather
+    than guessed - `stable` is the spec default, so silence says the same thing
+    without asserting it.
+    """
+    if ntype == "redirect":
+        return "deprecated"
+    raw = str(fm.get("status") or "").strip().lower()
+    if raw in DEPRECATED_STATUSES:
+        return "deprecated"
+    if raw in DRAFT_STATUSES:
+        return "draft"
+    return None
 
 
 def infer_type(fm, rel):
@@ -293,6 +330,46 @@ def main():
 
         return WIKILINK_RE.sub(repl, body)
 
+    def okf_sources(fm, from_rel):
+        """The note's `sources:` frontmatter as OKF v0.2 source entries.
+
+        v0.2 moved provenance out of a body `# Citations` list and into
+        frontmatter, where each entry requires a `resource`. Vault sources are a
+        mix of URLs and wikilinks; a wikilink resolves to the bundle-relative
+        path of the note it names, exactly as body links do, so the citation and
+        the link it came from point at the same file. An entry that resolves to
+        neither a URL nor a real note is dropped rather than exported as a
+        dangling resource - OKF requires `resource` per entry, and a made-up one
+        is worse than a shorter list.
+        """
+        raw = fm.get("sources")
+        if not raw:
+            return []
+        items = raw if isinstance(raw, list) else [raw]
+        from_dir = pathlib.PurePath(from_rel).parent
+        out_entries = []
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            m = WIKILINK_RE.fullmatch(s)
+            if m:
+                target = m.group(2).split("|", 1)[0].split("#", 1)[0].strip()
+                tgt_rel = name_to_rel.get(_nfc(_link_name(target)).lower())
+                if not tgt_rel:
+                    continue
+                rp = os.path.relpath(tgt_rel, from_dir) if str(from_dir) != "." else tgt_rel
+                out_entries.append(rp.replace(os.sep, "/"))
+            elif "://" in s:
+                out_entries.append(s)
+        # Order preserved, duplicates dropped: the same note cited twice is one source.
+        seen, uniq = set(), []
+        for e in out_entries:
+            if e not in seen:
+                seen.add(e)
+                uniq.append(e)
+        return uniq
+
     # 3) write the bundle
     out.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -312,7 +389,17 @@ def main():
             lines.append(f"resource: {yaml_val(resource)}")
         if tags:
             lines.append(f"tags: {yaml_val(tags)}")
-        lines.append(f"timestamp: {to_iso(fm, src)}")
+        status = okf_status(fm, ntype)
+        if status:
+            lines.append(f"status: {status}")
+        for entry in okf_sources(fm, rel):
+            if not any(ln == "sources:" for ln in lines):
+                lines.append("sources:")
+            lines.append(f"  - resource: {yaml_val(entry)}")
+        # v0.2: production time is `generated: {by, at}`, not a bare `timestamp`.
+        lines.append("generated:")
+        lines.append(f"  by: {yaml_val(GENERATED_BY)}")
+        lines.append(f"  at: {to_iso(fm, src)}")
         lines.append("---\n")
         fmblock = "\n".join(lines)
 
@@ -328,9 +415,9 @@ def main():
         groups.setdefault(top, []).append(rel)
     # §6: index.md carries no frontmatter; §11: the bundle-root index MAY declare okf_version
     # (the only frontmatter key permitted in any index.md).
-    idx = ['---', 'okf_version: "0.1"', "---", "",
+    idx = ['---', 'okf_version: "0.2"', "---", "",
            f"# {vault.name} - OKF bundle", "",
-           f"{written} concepts. Exported by obsidian-second-brain (OKF v0.1 compatible).", ""]
+           f"{written} concepts. Exported by obsidian-second-brain (OKF v0.2 compatible).", ""]
     for top in sorted(groups):
         idx.append(f"## {top}")
         idx.append("")

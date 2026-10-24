@@ -25,6 +25,7 @@ point for `.vault-config.json`; this module is the floor beneath it.
 
 from __future__ import annotations
 
+import os
 import re
 
 # Never scanned by any tool. Everything here is machine-owned: version control,
@@ -65,6 +66,22 @@ def excluded_dirs(*extra: str) -> frozenset[str]:
     return frozenset(d.lower() for d in (*BASE_EXCLUDE_DIRS, *extra))
 
 
+def is_hidden(parts) -> bool:
+    """True when any path component starts with a dot.
+
+    On a volume with no native extended attributes (exFAT, FAT32, many SMB
+    shares) macOS writes a small binary ``._<name>`` companion beside every
+    file it touches.  ``rglob("*.md")`` matches ``._Note.md``, and counting
+    it doubles the note in every stat, graph, and export.  Dot-prefixed
+    generally rather than ``._`` specifically, because that is the rule
+    Obsidian applies: it indexes no dot-prefixed file or folder.
+
+    vault_health already does this via its ``_is_hidden()`` helper (#290).
+    Placing the check here lets every tool that imports vault_scan benefit.
+    """
+    return any(str(p).startswith(".") for p in parts)
+
+
 def is_excluded(parts, excludes: frozenset[str]) -> bool:
     """True when any path component matches, compared case-insensitively.
 
@@ -73,6 +90,25 @@ def is_excluded(parts, excludes: frozenset[str]) -> bool:
     exactly what happened in vault_health's empty-folder check (B29).
     """
     return any(str(p).lower() in excludes for p in parts)
+
+
+# ── Semantic-index carve-out ────────────────────────────────────────────────
+# OBSIDIAN_EMBED_EXCLUDE names vault-relative path PREFIXES that are never
+# embedded. semantic_search applies it when it builds the index and vault_health
+# when it measures index coverage; parsing it once here keeps the two from
+# disagreeing about which notes the index is meant to hold (#273).
+
+
+def embed_exclude_prefixes(raw: str | None = None) -> tuple[str, ...]:
+    """OBSIDIAN_EMBED_EXCLUDE (comma-separated) as a tuple of prefixes, blanks dropped."""
+    if raw is None:
+        raw = os.environ.get("OBSIDIAN_EMBED_EXCLUDE", "")
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
+def is_embed_excluded(rel: str, prefixes) -> bool:
+    """True when a vault-relative POSIX path equals or starts with any prefix."""
+    return any(rel == p or rel.startswith(p) for p in prefixes)
 
 
 # ── Frontmatter ─────────────────────────────────────────────────────────────

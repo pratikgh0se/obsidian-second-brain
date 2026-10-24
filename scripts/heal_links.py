@@ -38,7 +38,7 @@ from difflib import get_close_matches
 from pathlib import Path
 
 # reuse the EXACT detection the health check uses, so our count == its count
-from note_io import read_exact, write_exact
+from note_io import NoteChangedError, read_exact, write_exact_if_unchanged
 from vault_health import check_wanted_notes, load_vault, load_vault_config, replace_outside_code
 
 DECORATION = re.compile(r"[#|].*$")          # a #heading anchor or |display alias
@@ -206,17 +206,26 @@ def apply_batch(vault):
     applied = files_touched = skipped = 0
     for rel, fixes in per_file.items():
         path = vault / rel
-        text = read_exact(path)
-        if text is None:
+        original = read_exact(path)
+        if original is None:
             print(f"  SKIPPED (not valid UTF-8, left untouched): {rel}")
             skipped += 1
             continue
+        text = original
         changed = 0
         for link, new_stem in fixes:
             text, n = _rewrite(text, link, new_stem)
             changed += n
         if changed:
-            write_exact(path, text)
+            try:
+                write_exact_if_unchanged(path, text, original)
+            except NoteChangedError:
+                # Another writer edited this note while we were working (#217).
+                # Its change is on disk and ours is not; overwriting would lose
+                # theirs silently, which is the whole failure being closed here.
+                print(f"  SKIPPED (changed on disk while healing, left untouched): {rel}")
+                skipped += 1
+                continue
             applied += changed
             files_touched += 1
 
@@ -281,7 +290,8 @@ def apply_loop(vault, max_fixes):
 
         rel, link, new_stem = nxt
         path = vault / rel
-        text = read_exact(path)
+        original = read_exact(path)
+        text = original
         if text is None:
             print(f"  SKIPPED (not valid UTF-8, left untouched): {rel}")
             skip_rels.add(rel)
@@ -296,7 +306,12 @@ def apply_loop(vault, max_fixes):
             print(f"  SKIPPED (no literal [[{link}]] outside code in {rel})")
             skip_rels.add(rel)
             continue
-        write_exact(path, text)
+        try:
+            write_exact_if_unchanged(path, text, original)
+        except NoteChangedError:
+            print(f"  SKIPPED (changed on disk while healing, left untouched): {rel}")
+            skip_rels.add(rel)
+            continue
 
         # Re-parse only the file that changed and patch it into the in-memory
         # scan, instead of re-reading the whole vault to learn one note's links.

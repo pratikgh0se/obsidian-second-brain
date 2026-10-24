@@ -172,3 +172,64 @@ def test_all_scaffold_note_still_embeds_identity():
     )
     assert body == ""
     assert "Ghost Town" in header
+
+
+# --- the lexical fusion depth (#262) -----------------------------------------
+
+def _fuse_with_lex_depth(vault, monkeypatch, depth, lexical):
+    """Run one fusion at a given OBSIDIAN_RRF_LEX_DEPTH, module reloaded."""
+    import importlib
+    monkeypatch.setenv("OBSIDIAN_RRF_LEX_DEPTH", str(depth))
+    mod = importlib.reload(vault_ops)
+    monkeypatch.setenv(mod._VAULT_ENV, str(vault))
+    # Only the semantic answer is indexed: a lexical hit's rank in the fusion is
+    # then its lexical vote and nothing else, which is the thing being measured.
+    index = {
+        "model": "fake", "format": 2,
+        "notes": {"semantic-only.md": {"title": "semantic only", "vecs": [[1.0, 0.0]]}},
+    }
+    (vault / mod._SEMANTIC_INDEX_FILE).write_text(json.dumps(index), encoding="utf-8")
+    monkeypatch.setattr(mod, "_embed_query", lambda q, **kw: [1.0, 0.0])
+    fused = mod._semantic_fuse("some multi word query", lexical, vault, 30, enabled=True)
+    return mod, fused
+
+
+def test_the_lexical_fusion_depth_ships_uncapped_and_the_knob_is_the_lever(vault, monkeypatch):
+    """#262: the comment on _FUSE_LEX_DEPTH said lexical votes are "capped to
+    its strongest few", and the default is _FUSE_DEPTH - so nothing is capped
+    until someone sets OBSIDIAN_RRF_LEX_DEPTH. A reader who believed the comment
+    would look elsewhere for the lexical tail that displaced their exact match.
+
+    This pins the two halves of that: the shipped default caps nothing, and the
+    knob really does cut the tail out of the vote.
+    """
+    import importlib
+    lexical = [{"path": f"lex{i}.md", "title": f"lex {i}", "score": 10.0 - i, "snippet": ""}
+               for i in range(20)]
+
+    monkeypatch.delenv("OBSIDIAN_RRF_LEX_DEPTH", raising=False)
+    default_mod = importlib.reload(vault_ops)
+    assert default_mod._FUSE_LEX_DEPTH == default_mod._FUSE_DEPTH, (
+        "the default is no longer the uncapped one the comment now documents"
+    )
+
+    _, wide = _fuse_with_lex_depth(vault, monkeypatch, 25, lexical)
+    _, narrow = _fuse_with_lex_depth(vault, monkeypatch, 2, lexical)
+    try:
+        wide_paths = {h["path"] for h in wide}
+        narrow_paths = {h["path"] for h in narrow}
+        assert "lex15.md" in wide_paths, (
+            "a lexical result 16 deep did not vote even at depth 25; the fixture "
+            "is not exercising the tail"
+        )
+        assert "lex15.md" not in narrow_paths, (
+            "OBSIDIAN_RRF_LEX_DEPTH=2 still let the lexical tail vote, so the knob "
+            "the comment points at does not do what it says"
+        )
+        assert len(narrow) < len(wide), (
+            "the knob did not shrink the candidate pool the lexical arm contributes"
+        )
+        assert narrow[0]["path"] == "semantic-only.md"
+    finally:
+        monkeypatch.delenv("OBSIDIAN_RRF_LEX_DEPTH", raising=False)
+        importlib.reload(vault_ops)

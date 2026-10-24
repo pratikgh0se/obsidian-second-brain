@@ -22,12 +22,16 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DIST = REPO_ROOT / "dist"
+# By path, not by name: on Windows a bare "bash" resolves through System32
+# before PATH, which is WSL's launcher when WSL is installed (#308).
+BASH = shutil.which("bash") or "bash"
 START = "<!-- conformance:start -->"
 END = "<!-- conformance:end -->"
 
@@ -57,7 +61,7 @@ def platforms() -> list[str]:
 
 def build_all() -> tuple[bool, str]:
     result = subprocess.run(
-        ["bash", "scripts/build.sh"],
+        [BASH, "scripts/build.sh"],
         cwd=REPO_ROOT, capture_output=True, text=True,
         encoding="utf-8", errors="replace", check=False,
     )

@@ -1,16 +1,20 @@
 """Loads research-toolkit credentials and model defaults from ~/.config/obsidian-second-brain/.env"""
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-CONFIG_DIR = Path.home() / ".config" / "obsidian-second-brain"
-# OBSIDIAN_ENV_FILE points every half of the toolkit (this loader, the free-mode
-# source config, the retrieval eval, the MCP server, the write-time hook) at one
-# file (on Windows a native path, C:/... or with backslashes, which bash and
-# Python can both open). Environment variables still win over anything the file sets.
-ENV_PATH = Path(os.environ.get("OBSIDIAN_ENV_FILE") or (CONFIG_DIR / ".env")).expanduser()
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import osb_env  # noqa: E402  (depends on the sys.path insert above)
+
+# Where the config lives is scripts/osb_env.py's question to answer, for every
+# half of the toolkit (this loader, the free-mode source config, the evals, the
+# SessionStart hook). Asking it here rather than spelling it out again is what
+# keeps OBSIDIAN_ENV_FILE meaning the same thing in all of them.
+CONFIG_DIR = osb_env.config_dir()
+ENV_PATH = osb_env.env_file()
 
 load_dotenv(ENV_PATH)
 

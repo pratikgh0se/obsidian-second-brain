@@ -1,6 +1,6 @@
 # The freshness policy
 
-> Part of **OKM - Open Knowledge Metabolism**, an open spec for keeping AI-maintained knowledge folders true, by Eugeniu Ghelbur (theaioperator.io). MIT-licensed. Where OKF (Open Knowledge Format) standardizes how agent knowledge is written, OKM is a companion spec for keeping it true.
+> Part of **OKM - Open Knowledge Metabolism**, an open spec for keeping AI-maintained knowledge folders true, by Eugeniu Ghelbur (theaioperator.io). MIT-licensed. OKF v0.2 gives you fields for recording that something went stale (`status`, `stale_after`, `verified`). OKM is the rule about what may be stored bare in the first place: every fact timeless, dated, or a pointer. A field cannot stop a note claiming "the pipeline has 13 deals" with no stamp on it; a linter that fails the build can.
 
 One rule, enforced by a lint: **every stored fact must be timeless, dated, or a pointer. Nothing may claim to be current without a stamp.**
 

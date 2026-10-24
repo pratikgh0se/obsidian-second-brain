@@ -67,7 +67,12 @@ except (Exception, SystemExit):  # pragma: no cover - fall back to a bare dotenv
     try:
         from dotenv import load_dotenv
 
-        load_dotenv(Path.home() / ".config" / "obsidian-second-brain" / ".env")
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import osb_env
+
+        # This fallback used to hardcode the path and ignore OBSIDIAN_ENV_FILE,
+        # so pointing the toolkit at a second config silently read the first.
+        load_dotenv(osb_env.env_file())
     except Exception:
         pass
 

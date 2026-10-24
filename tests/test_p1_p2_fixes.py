@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _bash import BASH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -75,7 +76,7 @@ def test_bytecode_cleanup_is_anchored_to_the_repo_not_the_cwd():
 
 def test_a_build_from_a_foreign_cwd_ships_no_bytecode(tmp_path):
     subprocess.run(
-        ["bash", str(REPO_ROOT / "scripts" / "build.sh"), "--platform", "hermes"],
+        [BASH, str(REPO_ROOT / "scripts" / "build.sh"), "--platform", "hermes"],
         cwd=tmp_path, capture_output=True, text=True, check=True,
     )
     stray = list((REPO_ROOT / "dist" / "hermes").rglob("*.pyc"))

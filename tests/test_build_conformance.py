@@ -25,6 +25,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _bash import BASH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DIST = REPO_ROOT / "dist"
@@ -52,7 +53,7 @@ def _tree_relative(cited: str) -> str:
 def built() -> Path:
     """Build every platform once, the way a release actually does it."""
     result = subprocess.run(
-        ["bash", "scripts/build.sh"],
+        [BASH, "scripts/build.sh"],
         cwd=REPO_ROOT,
         check=False,
         capture_output=True,
@@ -68,6 +69,20 @@ def test_every_adapter_is_discovered():
     """Guards the parametrization itself: if this drops to a handful, the rest of
     the file silently stops covering the platforms it claims to."""
     assert len(PLATFORMS) >= 7, f"expected 7+ adapters, found {PLATFORMS}"
+
+
+@pytest.mark.parametrize("platform", ["agent-skills", "codex-cli"])
+def test_first_brain_variant_ships_agent_initialization_and_ownership_rules(built, platform):
+    """Verify the installed instructions; this does not execute an agent."""
+    tree = built / platform
+    init = next(p for p in tree.rglob("SKILL.md") if p.parent.name == "obsidian-init")
+    ingest = next(p for p in tree.rglob("SKILL.md") if p.parent.name == "obsidian-ingest")
+    init_text = init.read_text(encoding="utf-8")
+    ingest_text = ingest.read_text(encoding="utf-8")
+    for marker in ("First-Brain/", "First Brain Protection", "filesystem tools"):
+        assert marker in init_text
+    for marker in ("First-Brain/", "source_path"):
+        assert marker in ingest_text
 
 
 @pytest.mark.parametrize("platform", PLATFORMS)

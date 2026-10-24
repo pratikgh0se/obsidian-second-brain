@@ -23,3 +23,24 @@ osb_platform_home() {
     *) OSB_WIN=0; OSB_HOME="$HOME" ;;
   esac
 }
+
+# Where the toolkit's config .env lives, for the bash half. Call after
+# osb_platform_home; sets OSB_ENV_FILE. OBSIDIAN_ENV_FILE overrides it, and on a
+# Windows shell the result is normalized to forward slashes so the same string
+# opens in bash and in Python.
+#
+# The Python half asks scripts/osb_env.py the same question. The two must agree:
+# an install writes the vault path here with bash and every command reads it back
+# with Python, so a disagreement is a config that exists and is never found -
+# #124, #160, #269 and #285, one bug, four releases. tests/test_osb_env.py checks
+# that both halves resolve the same file, and fails when a new inline copy of
+# this line appears.
+osb_env_file() {
+  # Called before osb_platform_home, $OSB_HOME is empty and the default becomes
+  # a relative path that resolves against whatever the caller's cwd happens to
+  # be: a config file found or not found depending on where you ran the script
+  # from. Resolving home here instead is what this whole helper is for.
+  [ -n "$OSB_HOME" ] || osb_platform_home
+  OSB_ENV_FILE="${OBSIDIAN_ENV_FILE:-$OSB_HOME/.config/obsidian-second-brain/.env}"
+  if [[ "$OSB_WIN" = 1 ]]; then OSB_ENV_FILE="${OSB_ENV_FILE//\\//}"; fi
+}

@@ -4,7 +4,7 @@ A plugin-installed command runs from the user's vault, not from a clone of this 
 and CLAUDE_PLUGIN_ROOT is not exported to the Bash a command later runs. So a command
 must never point at the maintainer's personal clone path, and every bundled-script
 invocation must anchor to the skill root the SessionStart hook publishes
-(`uv run --directory "SKILL_ROOT" ...`). These tests fail the build if either drifts.
+(`uv run --directory "SKILL_ROOT" ...` or a direct Python script under SKILL_ROOT). These tests fail the build if either drifts.
 """
 from __future__ import annotations
 
@@ -41,11 +41,13 @@ def test_every_bundled_script_invocation_anchors_to_skill_root():
     problems = []
     for c in COMMANDS:
         for lineno, line in enumerate(c.read_text(encoding="utf-8").splitlines(), 1):
-            if _INVOCATION.search(line) and '--directory "SKILL_ROOT"' not in line:
+            # Stdlib helpers need no uv project, but still need an absolute root.
+            direct = re.search(r'python3?\s+"SKILL_ROOT/scripts/[^"\n]+\.py"', line)
+            if _INVOCATION.search(line) and '--directory "SKILL_ROOT"' not in line and not direct:
                 problems.append(f"{c.name}:{lineno}: {line.strip()}")
     assert problems == [], (
         "these script invocations are not anchored to the published skill root "
-        '(expected `uv run --directory "SKILL_ROOT" ...`):\n' + "\n".join(problems)
+        '(expected a uv directory or direct Python path under SKILL_ROOT):\n' + "\n".join(problems)
     )
 
 

@@ -214,3 +214,259 @@ def test_invalid_tags_are_flagged_and_valid_ones_are_not(tmp_path):
     assert all(i["severity"] == "warning" for i in found)
     assert not [i for i in found if "good.md" in i["files"]]
     assert payload["counts"]["Invalid tags"] == 3
+
+
+def test_overlong_wikilink_is_a_wanted_note_not_a_crash(tmp_path):
+    """#272: inline script in a captured page (`[[null,null,...]]`) reads as a link
+    longer than the filesystem allows for a name. The folder check raised OSError
+    on Python <3.14 and ended the scan for the whole vault."""
+    target = ",".join(["null"] * 120)
+    (tmp_path / "scraped.md").write_text(
+        f"# scraped\n\nwindow.IJ_values = [[{target}]];\n", encoding="utf-8")
+    wanted = _issues(_health(tmp_path), "wanted_note")
+    assert any(target in i["message"] for i in wanted), wanted
+
+
+# ── #290: one link must not vouch for every note that shares a filename ──────
+
+def test_a_path_qualified_link_does_not_cover_a_same_named_note_elsewhere(tmp_path):
+    """Every link used to register its bare filename as well as its path, and
+    notes were only ever matched by stem. So one link covered every note sharing
+    a stem anywhere in the vault (#290).
+
+    Written against two dated notes in ordinary folders. The original report used
+    `wiki/daily/` and `Logs/`, which is where the collision actually bites in a
+    real vault, but both of those became exempt from the orphan check in #292,
+    so they can no longer show it."""
+    vault = tmp_path / "vault"
+    (vault / "Meetings").mkdir(parents=True)
+    (vault / "Archive").mkdir(parents=True)
+    (vault / "Home.md").write_text("see [[Meetings/2026-01-05]]\n", encoding="utf-8")
+    (vault / "Meetings" / "2026-01-05.md").write_text("back to [[Home]]\n", encoding="utf-8")
+    (vault / "Archive" / "2026-01-05.md").write_text("nothing links here\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "Archive/2026-01-05.md" in orphans, "the unlinked note must still be reported"
+    assert "Meetings/2026-01-05.md" not in orphans, "the linked note must not be"
+
+
+def test_one_linked_readme_does_not_cover_the_others(tmp_path):
+    """The same collision with a filename repeated per folder: linking one
+    `README` marked every other `README` in the vault as reached."""
+    vault = tmp_path / "vault"
+    (vault / "projects" / "alpha").mkdir(parents=True)
+    (vault / "projects" / "beta").mkdir(parents=True)
+    (vault / "Home.md").write_text("see [[projects/alpha/README]]\n", encoding="utf-8")
+    (vault / "projects" / "alpha" / "README.md").write_text("back to [[Home]]\n", encoding="utf-8")
+    (vault / "projects" / "beta" / "README.md").write_text("nothing links here\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "projects/beta/README.md" in orphans
+    assert "projects/alpha/README.md" not in orphans
+
+
+def test_obsidian_shortest_unique_path_link_still_resolves(tmp_path):
+    """Obsidian accepts the shortest path that is unique, so `[[alpha/README]]`
+    reaches `projects/alpha/README.md`. The fix matches a path-qualified link as
+    a suffix on a component boundary rather than as an exact path, so narrowing
+    the match does not turn working links into false orphans."""
+    vault = tmp_path / "vault"
+    (vault / "projects" / "alpha").mkdir(parents=True)
+    (vault / "Home.md").write_text("see [[alpha/README]]\n", encoding="utf-8")
+    (vault / "projects" / "alpha" / "README.md").write_text("back to [[Home]]\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "projects/alpha/README.md" not in orphans
+
+
+def test_a_partial_path_does_not_match_mid_component(tmp_path):
+    """The suffix match is on a `/` boundary: `[[eta/README]]` must not reach
+    `projects/beta/README.md` just because the string ends that way."""
+    vault = tmp_path / "vault"
+    (vault / "projects" / "beta").mkdir(parents=True)
+    (vault / "Home.md").write_text("see [[eta/README]]\n", encoding="utf-8")
+    (vault / "projects" / "beta" / "README.md").write_text("back to [[Home]]\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "projects/beta/README.md" in orphans
+
+
+# ── #290: macOS AppleDouble companions are not notes ─────────────────────────
+
+def test_apple_double_companions_are_not_scanned_as_notes(tmp_path):
+    """On a volume with no native extended attributes (exFAT, FAT32, many SMB
+    shares) macOS writes a binary `._<name>` beside every file it touches.
+    `rglob("*.md")` matched them, so each was parsed as a note and reported
+    three times over - orphan, missing frontmatter, and same-title duplicate of
+    the real note. On an exFAT vault they outnumbered the real findings, and no
+    `.vault-config.json` key could suppress them (#290)."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Alpha.md").write_text(
+        "---\ntitle: Alpha\ntags: [test]\n---\nSee [[Beta]].\n", encoding="utf-8")
+    (vault / "Beta.md").write_text(
+        "---\ntitle: Beta\ntags: [test]\n---\nSee [[Alpha]].\n", encoding="utf-8")
+    # What macOS actually writes: an AppleDouble header, not text.
+    for name in ("._Alpha.md", "._Beta.md"):
+        (vault / name).write_bytes(b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X" + b"\x00" * 40)
+
+    payload = _health(vault)
+    assert payload["total_notes"] == 2, "the companions must not count as notes"
+    assert payload["total_issues"] == 0, payload["issues"]
+
+
+def test_a_dot_prefixed_note_is_not_scanned(tmp_path):
+    """Dot-prefixed generally, not `._` specifically, because that is the rule
+    Obsidian applies: it indexes no dot-prefixed file. Reporting on a file the
+    user's own editor will not show them is noise either way."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Real.md").write_text("---\ntitle: Real\n---\ncontent\n", encoding="utf-8")
+    (vault / ".hidden.md").write_text("no frontmatter here\n", encoding="utf-8")
+
+    payload = _health(vault)
+    assert payload["total_notes"] == 1
+    assert not [i for i in payload["issues"] if ".hidden" in str(i.get("files"))]
+
+
+# ── #292: the dated-folder exemption knew only one of the two layouts ────────
+
+def test_wiki_style_daily_notes_are_exempt_like_obsidian_style_ones(tmp_path):
+    """The exemption read the TOP folder against Obsidian-style names, so a
+    wiki-style daily note at `wiki/daily/YYYY-MM-DD.md` (top folder `wiki`) rang
+    every day while `Daily/YYYY-MM-DD.md` next door did not. The same note was
+    noise or not depending only on which documented layout its owner picked."""
+    vault = tmp_path / "vault"
+    (vault / "Daily").mkdir(parents=True)
+    (vault / "wiki" / "daily").mkdir(parents=True)
+    (vault / "Home.md").write_text("dashboard\n", encoding="utf-8")
+    (vault / "Daily" / "2026-01-06.md").write_text("obsidian-style\n", encoding="utf-8")
+    (vault / "wiki" / "daily" / "2026-01-07.md").write_text("wiki-style\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "wiki/daily/2026-01-07.md" not in orphans
+    assert "Daily/2026-01-06.md" not in orphans
+
+
+def test_the_operations_log_is_exempt_in_both_layouts(tmp_path):
+    """`/obsidian-init` writes `Logs/YYYY-MM-DD.md` and nothing is meant to link
+    it, but `Logs` was in neither layout's list, so it rang once a day forever."""
+    vault = tmp_path / "vault"
+    (vault / "Logs").mkdir(parents=True)
+    (vault / "wiki" / "logs").mkdir(parents=True)
+    (vault / "Home.md").write_text("dashboard\n", encoding="utf-8")
+    (vault / "Logs" / "2026-01-08.md").write_text("ops log\n", encoding="utf-8")
+    (vault / "wiki" / "logs" / "2026-01-09.md").write_text("ops log\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "Logs/2026-01-08.md" not in orphans
+    assert "wiki/logs/2026-01-09.md" not in orphans
+
+
+def test_a_slugged_exempt_folder_is_recognised(tmp_path):
+    """Bootstrap writes a preset folder with no explicit mapping as a slug under
+    `wiki/` (#287), so `Life Chapters/` becomes `wiki/life-chapters/`. The
+    exemption reads the slug as its spaced form rather than missing it."""
+    vault = tmp_path / "vault"
+    (vault / "wiki" / "life-chapters").mkdir(parents=True)
+    (vault / "Home.md").write_text("dashboard\n", encoding="utf-8")
+    (vault / "wiki" / "life-chapters" / "2019.md").write_text("a chapter\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "wiki/life-chapters/2019.md" not in orphans
+
+
+def test_the_exemption_is_casefolded(tmp_path):
+    """The old set was spelled with capitals and compared without folding, so a
+    vault whose folder is `daily/` got the noise a vault with `Daily/` did not."""
+    vault = tmp_path / "vault"
+    (vault / "daily").mkdir(parents=True)
+    (vault / "Home.md").write_text("dashboard\n", encoding="utf-8")
+    (vault / "daily" / "2026-01-10.md").write_text("lowercase folder\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "daily/2026-01-10.md" not in orphans
+
+
+def test_a_real_wiki_note_is_still_orphan_checked(tmp_path):
+    """The exemption must not swallow the whole `wiki/` tree: only the dated and
+    machine-written folders under it are exempt, not projects or concepts."""
+    vault = tmp_path / "vault"
+    (vault / "wiki" / "projects").mkdir(parents=True)
+    (vault / "Home.md").write_text("dashboard\n", encoding="utf-8")
+    (vault / "wiki" / "projects" / "Tide.md").write_text("nothing links here\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "wiki/projects/Tide.md" in orphans
+
+
+def test_a_root_note_named_like_an_exempt_folder_is_still_checked(tmp_path):
+    """`Logs.md` at the vault root is a note, not the operations-log folder."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Home.md").write_text("dashboard\n", encoding="utf-8")
+    (vault / "Logs.md").write_text("nothing links here\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "Logs.md" in orphans
+
+
+PLAIN_BODY = "## [2026-01-05] save | an appended entry in a file with no frontmatter\n"
+
+
+def test_system_files_need_no_frontmatter_at_any_depth(tmp_path):
+    """The write-time validator exempts _CLAUDE.md, Home.md, index.md, log.md and
+    catchup.md wherever they sit. The health check exempted only the first two, and
+    only at the root, so a monolithic log.md (plain appended entries) and a nested
+    vault's own _CLAUDE.md (the template has no frontmatter) were reported."""
+    vault = tmp_path / "vault"
+    (vault / "personal").mkdir(parents=True)
+    for rel in ("log.md", "index.md", "catchup.md", "personal/_CLAUDE.md", "personal/log.md"):
+        (vault / rel).write_text(PLAIN_BODY, encoding="utf-8")
+
+    flagged = {i["files"][0] for i in _issues(_health(vault), "no_frontmatter")}
+    assert flagged == set(), flagged
+
+
+def test_a_note_merely_ending_in_a_system_name_still_needs_frontmatter(tmp_path):
+    """Matched on the whole filename: `changelog.md` is a note, not `log.md`."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "changelog.md").write_text(PLAIN_BODY, encoding="utf-8")
+
+    flagged = {i["files"][0] for i in _issues(_health(vault), "no_frontmatter")}
+    assert "changelog.md" in flagged
+
+
+def test_a_title_ending_in_dot_md_is_reached_by_its_link(tmp_path):
+    """A note titled `... _CLAUDE.md` is saved as `... _CLAUDE.md.md`. Its link
+    `[[... _CLAUDE.md]]` resolves (no wanted_note), but the orphan check stripped
+    the `.md` as a redundant extension and then matched nothing, so the note was
+    reported as an orphan. Bare and path-qualified links both reach it."""
+    vault = tmp_path / "vault"
+    (vault / "Decisions").mkdir(parents=True)
+    (vault / "Rename _CLAUDE.md.md").write_text("a decision\n", encoding="utf-8")
+    (vault / "Decisions" / "Adopt README.md.md").write_text("a decision\n", encoding="utf-8")
+    (vault / "Home.md").write_text(
+        "[[Rename _CLAUDE.md]] and [[Decisions/Adopt README.md]]\n", encoding="utf-8"
+    )
+
+    payload = _health(vault)
+    orphans = {i["files"][0] for i in _issues(payload, "orphan")}
+    assert "Rename _CLAUDE.md.md" not in orphans
+    assert "Decisions/Adopt README.md.md" not in orphans
+    assert _issues(payload, "wanted_note") == []
+
+
+def test_a_redundant_md_extension_on_a_link_still_counts(tmp_path):
+    """`[[target.md]]` still reaches `target.md`: keeping the unstripped form must
+    not drop the stripped one."""
+    vault = tmp_path / "vault"
+    (vault / "Projects").mkdir(parents=True)
+    (vault / "target.md").write_text("linked\n", encoding="utf-8")
+    (vault / "Projects" / "deep.md").write_text("linked\n", encoding="utf-8")
+    (vault / "Home.md").write_text("[[target.md]] and [[Projects/deep.md]]\n", encoding="utf-8")
+
+    orphans = {i["files"][0] for i in _issues(_health(vault), "orphan")}
+    assert "target.md" not in orphans
+    assert "Projects/deep.md" not in orphans

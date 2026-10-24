@@ -7,12 +7,17 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Windows shells, HOME elsewhere. See scripts/platform-home.sh.
 . "$SKILL_DIR/scripts/platform-home.sh"
 osb_platform_home
+# osb_python: a Python that actually runs, found by running it (#269).
+. "$SKILL_DIR/scripts/python-interpreter.sh"
 CLAUDE_DIR="$OSB_HOME/.claude"
 COMMANDS_DIR="$CLAUDE_DIR/commands"
 SKILLS_DIR="$CLAUDE_DIR/skills"
 CONFIG_DIR="$OSB_HOME/.config/obsidian-second-brain"
-ENV_FILE="${OBSIDIAN_ENV_FILE:-$CONFIG_DIR/.env}"
-if [ "$OSB_WIN" = 1 ]; then ENV_FILE="${ENV_FILE//\\//}"; fi  # a native C:\... override must survive dirname
+# osb_env_file sets OSB_ENV_FILE: the config path, OBSIDIAN_ENV_FILE honoured and
+# a native C:\... override normalized so it survives dirname. One helper, so this
+# installer and every reader of the file it writes agree on where it is.
+osb_env_file
+ENV_FILE="$OSB_ENV_FILE"
 
 echo "Installing obsidian-second-brain..."
 
@@ -70,14 +75,22 @@ fi
 # Register the SessionStart context hook so slash commands can locate the skill's
 # bundled scripts. The plugin install wires this up automatically via its manifest;
 # the skill install needs it in settings.json. Idempotent, safe to re-run.
+# The interpreter is found by running it, never by looking the name up: on a
+# stock Windows install `python3` is the Microsoft Store alias, which passes
+# `command -v` and exits non-zero, and under `set -e` that ended this installer
+# on the spot, with no hook registered and the steps below never reached (#281).
 echo "Registering session context hook..."
-if command -v python3 >/dev/null 2>&1; then
-  python3 "$SKILL_DIR/scripts/setup_settings_hook.py"
-elif command -v python >/dev/null 2>&1; then
-  python "$SKILL_DIR/scripts/setup_settings_hook.py"
+if PYTHON=$(osb_python); then
+  # Unquoted: PYTHON may be several words ("py -3", "uv run --no-project python").
+  $PYTHON "$SKILL_DIR/scripts/setup_settings_hook.py"
+  # Another vault plugin's SessionStart hook is not replaced by ours, it runs
+  # beside it and puts a second folder and frontmatter schema in the same
+  # context (#300). Said here, while the user can still choose, instead of
+  # leaving it to surface through notes written under the wrong schema.
+  $PYTHON "$SKILL_DIR/scripts/vault_plugin_scan.py" --quiet || true
 else
-  echo "  python not found - add this SessionStart hook to $CLAUDE_DIR/settings.json manually:"
-  echo "    python3 \"$SKILLS_DIR/obsidian-second-brain/hooks/load_vault_context.py\""
+  echo "  no working Python found (tried python3, python, py -3, uv run) - add this SessionStart hook to $CLAUDE_DIR/settings.json manually:"
+  echo "    \"$SKILLS_DIR/obsidian-second-brain/hooks/load_vault_context.sh\""
 fi
 
 # ── Research toolkit setup (optional) ──────────────────────────────

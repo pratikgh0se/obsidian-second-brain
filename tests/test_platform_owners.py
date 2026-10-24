@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _bash import BASH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OWNERS = REPO_ROOT / "adapters" / "OWNERS.md"
@@ -81,7 +82,7 @@ def test_the_previously_contributed_column_is_credit_not_assignment():
 
 def _build(platform: str, tmp: Path) -> str:
     """Build one platform from a copy of the repo and return its INSTALL.md."""
-    r = subprocess.run(["bash", "scripts/build.sh", "--platform", platform],
+    r = subprocess.run([BASH, "scripts/build.sh", "--platform", platform],
                        cwd=tmp, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr or r.stdout
     return (tmp / "dist" / platform / "INSTALL.md").read_text(encoding="utf-8")

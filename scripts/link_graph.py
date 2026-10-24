@@ -131,16 +131,6 @@ def _aliases(fm: str) -> list[str]:
     return [a for a in out if a]
 
 
-def _link_target(link: str) -> str:
-    """Reduce a raw wikilink body to its target title: drop alias (|), anchor (#), path."""
-    link = link.split("|", 1)[0].split("#", 1)[0].strip().rstrip("\\")
-    if "/" in link:
-        link = link.rsplit("/", 1)[-1]
-    if link.endswith(".md"):
-        link = link[:-3]
-    return link
-
-
 def _parse_relations(fm: str) -> list[tuple[str, str]]:
     """Pull (edge_type, target_title) pairs from a note's frontmatter.
 
@@ -227,14 +217,22 @@ def build_graph(vault: Path, scope: str | None = None) -> dict:
 
     def _resolve(raw: str) -> str | None:
         body = raw.split("|", 1)[0].split("#", 1)[0].strip().rstrip("\\")
+        # A trailing .md is usually a redundant extension, but a note titled
+        # `... _CLAUDE.md` is saved as `... _CLAUDE.md.md`. The stripped form goes
+        # first, so every link that resolved before resolves the same way.
+        forms = [body[:-3], body] if body.lower().endswith(".md") else [body]
         if "/" in body:
             # [[Projects/ProjectX]] disambiguates twins by path: match the full
             # relative path first, basename only as a fallback.
-            p = body[:-3] if body.lower().endswith(".md") else body
-            hit = relpath_to_rel.get(_norm(p))
+            for p in forms:
+                hit = relpath_to_rel.get(_norm(p))
+                if hit:
+                    return hit
+        for p in forms:
+            hit = key_to_rel.get(_norm(p.rsplit("/", 1)[-1]))
             if hit:
                 return hit
-        return key_to_rel.get(_norm(_link_target(raw)))
+        return None
 
     edges: list[dict] = []
     dangling = 0

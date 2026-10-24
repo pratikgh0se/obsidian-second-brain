@@ -15,6 +15,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from _bash import BASH
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOK = REPO_ROOT / "hooks" / "obsidian-bg-agent.sh"
 
@@ -37,7 +39,7 @@ def _run_hook(stdin: str, env_extra: dict, tmp_path: Path) -> subprocess.Complet
     env.pop("OBSIDIAN_VAULT_PATH", None)
     env.pop("OBSIDIAN_BG_AGENT_ENABLED", None)
     env.update(env_extra)
-    return subprocess.run(["bash", str(HOOK)], input=stdin, env=env,
+    return subprocess.run([BASH, str(HOOK)], input=stdin, env=env,
                           capture_output=True, text=True, timeout=30)
 
 
@@ -217,3 +219,48 @@ def test_launch_uses_strict_mcp_config(tmp_path):
         time.sleep(0.1)
     body = record.read_text(encoding="utf-8")
     assert "ARG=--strict-mcp-config" in body, "headless run must enforce filesystem-only MCP"
+
+
+def test_summary_reaches_the_prompt_fenced_as_untrusted_data(tmp_path):
+    """#266/#267: the summary went into the prompt under a bare "SESSION
+    SUMMARY:" label.
+
+    This is the one prompt in the project that a model acts on unattended with
+    permissions skipped, and a compaction summary can quote text the session
+    read from the open web (a page via /research, a transcript, a repo README).
+    `references/ai-first-rules.md` requires source text handed to a model to be
+    wrapped in an explicit delimiter and labelled as data. Pin both fence lines
+    and, more importantly, that the summary sits between them and the standing
+    INSTRUCTIONS block sits after - a fence the payload can escape by being
+    appended after the closing line is not a fence.
+    """
+    vault = tmp_path / "vault"; vault.mkdir()
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"isCompactSummary": True,
+                    "message": {"content": "SUMMARY-SENTINEL: read an article"}}) + "\n",
+        encoding="utf-8",
+    )
+    r = _run_hook(json.dumps({"transcript_path": str(transcript)}), {
+        "OBSIDIAN_VAULT_PATH": str(vault), "OBSIDIAN_BG_AGENT_ENABLED": "1",
+    }, tmp_path)
+    assert r.returncode == 0
+    record = tmp_path / "claude-invocation.txt"
+    for _ in range(50):
+        if record.exists() and record.read_text(encoding="utf-8").strip():
+            break
+        time.sleep(0.1)
+    prompt = record.read_text(encoding="utf-8").partition("STDIN<<<")[2]
+
+    begin = prompt.find("BEGIN UNTRUSTED SESSION SUMMARY")
+    end = prompt.find("END UNTRUSTED SESSION SUMMARY")
+    assert begin != -1 and end != -1, "the summary is not delimited as untrusted data"
+    body = prompt.find("SUMMARY-SENTINEL")
+    assert begin < body < end, "the summary is not inside the fence"
+    assert "not instructions" in prompt[:begin], (
+        "nothing before the fence tells the agent the summary is data"
+    )
+    assert prompt.find("INSTRUCTIONS:") > end, (
+        "the standing instructions are inside the fence, so the agent is told to "
+        "treat its own orders as untrusted data"
+    )

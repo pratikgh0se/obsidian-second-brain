@@ -12,11 +12,37 @@ Writes are atomic. A note is rewritten by writing a sibling temp file and renami
 it over the target, so an interrupted write (Ctrl-C, a crash, a disk that fills
 mid-write) can never leave a real note truncated or half-written. The original
 survives untouched until one final same-filesystem rename swaps the new bytes in.
+
+Atomic is not the same as safe from a concurrent writer (#217). Every caller here
+reads a note, transforms the text, and writes it back, and the gap between the
+read and the write is where a second writer's change is lost - silently, because
+both writes succeed. A multi-adapter vault runs in exactly that shape: a Hermes
+cron agent and a live session against one vault, plus LiveSync landing a third
+device's edits as a local file change. `write_exact_if_unchanged` closes that by
+checking, immediately before the rename, that the note still holds the bytes the
+caller read. It refuses rather than overwrites. See NoteChangedError.
 """
 import os
 import stat as stat_mod
 import tempfile
 from pathlib import Path
+
+
+class NoteChangedError(RuntimeError):
+    """A note changed on disk between the caller's read and its write (#217).
+
+    Carries `path` so a caller processing many notes can report which one it
+    skipped and keep going. Raised, never swallowed: the whole point is that a
+    lost update stops being silent.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        super().__init__(
+            f"{self.path} changed on disk since it was read - refusing to overwrite. "
+            "Another writer (a scheduled agent, a second session, or a sync client) "
+            "edited it; re-read the note and redo the change."
+        )
 
 
 def read_exact(path: Path) -> str | None:
@@ -68,3 +94,35 @@ def write_exact(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def write_exact_if_unchanged(path: Path, text: str, expected: str | None) -> None:
+    """write_exact, but only while the note still holds the bytes it was read with.
+
+    `expected` is what read_exact returned for this path, or None when the caller
+    means "this note must not exist yet". If the file on disk no longer matches,
+    nothing is written and NoteChangedError is raised.
+
+    What this does and does not buy. It does not make the read and the write one
+    operation - a writer that lands between the comparison below and the rename
+    a few microseconds later still wins. What it removes is the window that
+    actually loses data here: the seconds or minutes an agent spends thinking
+    between reading a note and writing it back, during which a cron agent, a
+    second session, or a sync client rewrites the same file. A lock would not
+    cover the last of those anyway, because a change replicated onto disk by a
+    sync client participates in no lock this process could hold.
+
+    The comparison is over bytes, not mtime: a same-size edit inside one
+    timestamp tick is invisible to stat on a filesystem with coarse timestamps,
+    and a synced vault is exactly where those turn up.
+    """
+    if expected is None:
+        # "must not exist yet" is checked as absence, never as a read result:
+        # read_exact returns None for a file that is not valid UTF-8 too, and
+        # treating that as absent would let this clobber the one class of file
+        # the module exists to refuse to rewrite.
+        if path.exists():
+            raise NoteChangedError(path)
+    elif read_exact(path) != expected:
+        raise NoteChangedError(path)
+    write_exact(path, text)

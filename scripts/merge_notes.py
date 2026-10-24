@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from export_okf import parse_note  # noqa: E402 - reuse the one dict-frontmatter parser in the repo
-from note_io import read_exact, write_exact  # noqa: E402
+from note_io import NoteChangedError, read_exact, write_exact_if_unchanged  # noqa: E402
 from vault_health import check_duplicates, load_vault, load_vault_config  # noqa: E402
 
 # Bare tokens (idea, active, 2026-08-26, research-notebooklm) are left unquoted,
@@ -115,6 +115,12 @@ class MergeResult:
     canonical_text: str
     redirect_text: str
     merged_fm: dict
+    # The exact bytes each note held when the merge was computed (#217). --apply
+    # can run long after the dry run the user read, and a merge rewrites one note
+    # whole and replaces the other with a stub, so a concurrent edit to either is
+    # the most expensive one in the project to lose.
+    canonical_before: str = ""
+    retire_before: str = ""
     conflicts: dict = field(default_factory=dict)
     alias_added: str | None = None
 
@@ -171,12 +177,12 @@ def _load_note(vault: Path, rel: str) -> tuple:
     fm, body, malformed = parse_note(text)
     if malformed:
         raise SystemExit(f"frontmatter is malformed YAML, fix it before merging: {rel}")
-    return fm, body, text.startswith("\ufeff")
+    return fm, body, text.startswith("\ufeff"), text
 
 
 def compute_merge(vault: Path, canonical_rel: str, retire_rel: str, merged_body: str) -> MergeResult:
-    canonical_fm, _, canonical_bom = _load_note(vault, canonical_rel)
-    retired_fm, _, retired_bom = _load_note(vault, retire_rel)
+    canonical_fm, _, canonical_bom, canonical_before = _load_note(vault, canonical_rel)
+    retired_fm, _, retired_bom, retire_before = _load_note(vault, retire_rel)
     retired_title = Path(retire_rel).stem
     canonical_title = Path(canonical_rel).stem
 
@@ -224,6 +230,8 @@ def compute_merge(vault: Path, canonical_rel: str, retire_rel: str, merged_body:
         canonical_text=canonical_text,
         redirect_text=redirect_text,
         merged_fm=merged_fm,
+        canonical_before=canonical_before,
+        retire_before=retire_before,
         conflicts=conflicts,
         alias_added=alias_added,
     )
@@ -248,8 +256,20 @@ def preview(result: MergeResult) -> None:
 
 
 def apply_merge(vault: Path, result: MergeResult) -> None:
-    write_exact(vault / result.canonical_rel, result.canonical_text)
-    write_exact(vault / result.retire_rel, result.redirect_text)
+    """Write both halves, or neither (#217).
+
+    Both notes are checked against the bytes the merge was computed from before
+    either is written, so a concurrent edit cannot leave the vault half-merged -
+    a canonical note holding the merged body while the note it was supposed to
+    retire still stands as a second copy is worse than no merge at all.
+    """
+    canonical = vault / result.canonical_rel
+    retire = vault / result.retire_rel
+    for path, before in ((canonical, result.canonical_before), (retire, result.retire_before)):
+        if read_exact(path) != before:
+            raise NoteChangedError(path)
+    write_exact_if_unchanged(canonical, result.canonical_text, result.canonical_before)
+    write_exact_if_unchanged(retire, result.redirect_text, result.retire_before)
     print(f"\nMerged. {result.retire_rel} is now a redirect stub pointing at {result.canonical_rel}.\n")
 
 

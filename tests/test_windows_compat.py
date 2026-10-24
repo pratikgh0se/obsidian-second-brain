@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _bash import BASH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,7 +41,7 @@ def test_validate_hook_matches_windows_backslash_paths(tmp_path):
 
     def run(file_path, vault):
         return subprocess.run(
-            ["bash", str(hook)],
+            [BASH, str(hook)],
             input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": file_path}}),
             env=dict(os.environ, OBSIDIAN_VAULT_PATH=vault),
             capture_output=True,
@@ -143,7 +144,7 @@ def test_validate_hook_env_fallback_uses_the_platform_home(tmp_path):
         env["HOME"] = str(platform_home)
         env.pop("USERPROFILE", None)
     r = subprocess.run(
-        ["bash", str(hook)],
+        [BASH, str(hook)],
         input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(bad)}}),
         env=env,
         capture_output=True,
@@ -163,7 +164,7 @@ def test_validate_hook_env_fallback_uses_the_platform_home(tmp_path):
         (broken / "cygpath").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
         env["PATH"] = f"{broken}{os.pathsep}{env['PATH']}"
         r = subprocess.run(
-            ["bash", str(hook)],
+            [BASH, str(hook)],
             input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(bad)}}),
             env=env,
             capture_output=True,
@@ -181,7 +182,7 @@ def test_validate_hook_env_fallback_uses_the_platform_home(tmp_path):
     elsewhere.write_bytes(f"OBSIDIAN_VAULT_PATH={vault}\r\n".encode("utf-8"))
     env["OBSIDIAN_ENV_FILE"] = str(elsewhere)
     r = subprocess.run(
-        ["bash", str(hook)],
+        [BASH, str(hook)],
         input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(bad)}}),
         env=env,
         capture_output=True,
@@ -212,7 +213,7 @@ def test_validate_hook_accepts_crlf_notes(tmp_path):
 
     def run(f):
         return subprocess.run(
-            ["bash", str(hook)],
+            [BASH, str(hook)],
             input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(f)}}),
             env=dict(os.environ, OBSIDIAN_VAULT_PATH=str(vault)),
             capture_output=True,
@@ -242,6 +243,44 @@ def test_validate_hook_accepts_crlf_notes(tmp_path):
     assert "secret material" in msg, f"the secret scan must run on a CRLF note, got: {msg[:300]}"
 
 
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_validate_hook_accepts_bom_notes(tmp_path, eol):
+    """A note saved with a leading UTF-8 BOM (some Windows editors write one)
+    was reported as having no frontmatter, because the first line read as
+    BOM + `---` (#295). The checks now read a copy without the BOM, with or
+    without CRLF; a valid BOM note is silent and a broken one still warns."""
+    hook = REPO_ROOT / "hooks/validate-ai-first.sh"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    good = vault / "good.md"
+    good.write_bytes(
+        b"\xef\xbb\xbf" + eol.join([
+            "---", "type: note", "date: 2026-09-02", "tags: [t]", "ai-first: true", "---", "",
+            "## For future agent", "", "A BOM note that follows every rule.", "",
+        ]).encode("utf-8")
+    )
+    bad = vault / "bad.md"
+    bad.write_bytes(b"\xef\xbb\xbf" + eol.join(["---", "type: note", "---", "", "body", ""]).encode("utf-8"))
+
+    def run(f):
+        return subprocess.run(
+            [BASH, str(hook)],
+            input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(f)}}),
+            env=dict(os.environ, OBSIDIAN_VAULT_PATH=str(vault)),
+            capture_output=True,
+            text=True,
+        )
+
+    r = run(good)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "", f"a valid BOM note must be silent, got: {r.stdout[:200]}"
+    r = run(bad)
+    assert r.returncode == 0, r.stderr
+    msg = json.loads(r.stdout)["systemMessage"]
+    assert "has no frontmatter" not in msg
+    assert "missing 'ai-first: true'" in msg
+
+
 def test_validate_hook_leaves_posix_backslash_paths_alone(tmp_path):
     """A backslash is a legal character in a macOS or Linux filename. The path
     normalization runs only on Windows shells, so such a path must still be
@@ -255,7 +294,7 @@ def test_validate_hook_leaves_posix_backslash_paths_alone(tmp_path):
     bad = odd / "bad.md"
     bad.write_text("# no frontmatter\n", encoding="utf-8")
     r = subprocess.run(
-        ["bash", str(hook)],
+        [BASH, str(hook)],
         input=json.dumps({"tool_name": "Write", "tool_input": {"file_path": str(bad)}}),
         env=dict(os.environ, OBSIDIAN_VAULT_PATH=str(vault)),
         capture_output=True,

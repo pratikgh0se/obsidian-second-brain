@@ -125,3 +125,21 @@ def test_counts_pinned_to_vault_health(tmp_path):
     wanted = [i for i in payload["issues"] if i.get("type") == "wanted_note"]
 
     assert g["stats"]["dangling_link_count"] == len(wanted) == 2
+
+def test_a_title_ending_in_dot_md_is_an_edge_not_a_dangling_link(tmp_path):
+    """`[[Rename _CLAUDE.md]]` targets `Rename _CLAUDE.md.md`. Stripping the `.md`
+    as a redundant extension left nothing to match, so the link was dangling and
+    both notes orphans. A redundant extension on a plain note still resolves."""
+    vault = tmp_path / "vault"
+    (vault / "Decisions").mkdir(parents=True)
+    (vault / "Rename _CLAUDE.md.md").write_text("# t\n", encoding="utf-8")
+    (vault / "Decisions" / "Adopt README.md.md").write_text("# t\n", encoding="utf-8")
+    (vault / "plain.md").write_text("# t\n", encoding="utf-8")
+    (vault / "linker.md").write_text(
+        "[[Rename _CLAUDE.md]] [[Decisions/Adopt README.md]] [[plain.md]]\n",
+        encoding="utf-8",
+    )
+
+    g = _graph(vault)
+    assert g["stats"]["dangling_link_count"] == 0
+    assert g["stats"]["edge_count"] == 3

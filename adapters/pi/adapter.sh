@@ -212,7 +212,10 @@ environment variables, or you can export them before running Pi.
 
 ## Background agents
 
-Pi has no background-bash or PostCompact-hook equivalent. Run `/obsidian-nightly`
-manually or schedule it with cron outside of Pi.
+Pi has no background-bash or PostCompact-hook equivalent. The scheduled agents
+(`obsidian-nightly` and the others) are prompts, not commands, so there is no
+`/obsidian-nightly` prompt template. To run one, copy its prompt from the
+scheduled agents section of `SKILL.md` into a Pi session, by hand or from your
+own scheduler.
 EOF
 }

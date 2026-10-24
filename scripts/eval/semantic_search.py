@@ -49,9 +49,12 @@ EMBED_MODEL = os.environ.get("OBSIDIAN_EMBED_MODEL", "bge-m3")
 EMBED_BACKEND = os.environ.get("OBSIDIAN_EMBED_BACKEND", "ollama").lower()
 EMBED_URL = os.environ.get("OBSIDIAN_EMBED_URL", OLLAMA_URL).rstrip("/")
 EMBED_KEY = os.environ.get("OBSIDIAN_EMBED_KEY", "")
-EXCLUDE_PREFIXES = tuple(
-    p.strip() for p in os.environ.get("OBSIDIAN_EMBED_EXCLUDE", "").split(",") if p.strip()
-)
+# Parsed in scripts/vault_scan.py, which vault_health's coverage check shares, so
+# a note excluded here is never reported as missing from the index (#273).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from vault_scan import embed_exclude_prefixes, is_embed_excluded  # noqa: E402
+
+EXCLUDE_PREFIXES = embed_exclude_prefixes()
 # Per-vault escape hatch: prefixes here are indexed even if INDEX_POLICY denies
 # them (comma-separated, vault-relative), e.g. "Architecture/skills/claude-code".
 ALLOW_PREFIXES_ENV = tuple(
@@ -100,7 +103,38 @@ _CHUNK_OVERLAP_CHARS = 500           # a fact on a boundary lands in both chunks
                                      # (self-caps at room // 4, so ~300 here)
 # The per-note ceiling: 8 x 1,200 = 9,600 embedded chars. A note that reaches it
 # is named on stderr and counted by `--stats`, never truncated in silence.
-_MAX_CHUNKS = 8
+# Default 8 (the measured geometry); OBSIDIAN_EMBED_MAX_CHUNKS can raise it
+# (upstream knob, validated by _read_max_chunks below).
+_MAX_CHUNKS_DEFAULT = 8
+
+
+def _read_max_chunks(raw: str | None) -> int:
+    """OBSIDIAN_EMBED_MAX_CHUNKS, or the default when it is not a usable count.
+
+    The cap is applied as `chunks[:_MAX_CHUNKS]`, so a bad value fails silently
+    and destructively rather than loudly: `0` embeds nothing and the note is
+    dropped from the index as unembeddable, and `-1` quietly drops the last
+    chunk of every long note. Both look like a working build. Anything that is
+    not an integer of 1 or more falls back to the default and says so once on
+    stderr.
+    """
+    if raw is None or not raw.strip():
+        return _MAX_CHUNKS_DEFAULT
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = 0
+    if value < 1:
+        print(
+            f"[semantic] OBSIDIAN_EMBED_MAX_CHUNKS={raw.strip()!r} is not a chunk "
+            f"count of 1 or more - using the default {_MAX_CHUNKS_DEFAULT}.",
+            file=sys.stderr,
+        )
+        return _MAX_CHUNKS_DEFAULT
+    return value
+
+
+_MAX_CHUNKS = _read_max_chunks(os.environ.get("OBSIDIAN_EMBED_MAX_CHUNKS"))
 # Never subdivide below this: past it, chunks carry no context worth embedding.
 _MIN_CHUNK_CHARS = 200
 
@@ -431,7 +465,7 @@ def _content_hash(text: str) -> str:
 
 
 def _excluded(rel: str) -> bool:
-    return any(rel == p or rel.startswith(p) for p in EXCLUDE_PREFIXES)
+    return is_embed_excluded(rel, EXCLUDE_PREFIXES)
 
 
 _MIRROR_RES = tuple(re.compile(p, re.IGNORECASE) for p in INDEX_POLICY["deny_path_patterns"])
@@ -531,7 +565,7 @@ def _atomic_write_index(index_path: Path, payload: dict) -> None:
     """
     tmp = index_path.with_name(index_path.name + f".tmp{os.getpid()}")
     try:
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         tmp.replace(index_path)
     finally:
         if tmp.exists():

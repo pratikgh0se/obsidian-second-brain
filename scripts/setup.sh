@@ -21,9 +21,11 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 osb_platform_home
 SETTINGS="$OSB_HOME/.claude/settings.json"
 HOOK_SCRIPT="$SKILL_DIR/hooks/obsidian-bg-agent.sh"
-SESSION_HOOK="$SKILL_DIR/hooks/load_vault_context.py"
-ENV_FILE="${OBSIDIAN_ENV_FILE:-$OSB_HOME/.config/obsidian-second-brain/.env}"
-if [[ "$OSB_WIN" = 1 ]]; then ENV_FILE="${ENV_FILE//\\//}"; fi
+# The .sh wrapper, not the .py: it resolves an interpreter that actually runs
+# before handing over, which the bare `python3` name does not do on Windows (#269).
+SESSION_HOOK="$SKILL_DIR/hooks/load_vault_context.sh"
+osb_env_file
+ENV_FILE="$OSB_ENV_FILE"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -145,16 +147,34 @@ fi
 
 # ── add SessionStart hook ────────────────────────────────────────────────────
 
-SESSION_HOOK_CMD="python3 $SESSION_HOOK"
+SESSION_HOOK_CMD="$SESSION_HOOK"
 
+# Matched on the script name, not the whole command: an install made before #269
+# registered `python3 <...>/load_vault_context.py`, and that is exactly the
+# command that silently does nothing on Windows. Finding it means upgrading it,
+# not skipping it and not adding a second entry beside the dead one.
 EXISTING_SESSION=$(jq -r '
   .hooks.SessionStart // [] |
   .[].hooks // [] |
   .[].command // ""
-' "$SETTINGS" 2>/dev/null | grep -F "$SESSION_HOOK" || true)
+' "$SETTINGS" 2>/dev/null | grep -F "load_vault_context" || true)
 
 if [[ -n "$EXISTING_SESSION" ]]; then
-  yellow "   SessionStart hook already configured - skipping"
+  if [[ "$EXISTING_SESSION" == "$SESSION_HOOK_CMD" ]]; then
+    yellow "   SessionStart hook already configured - skipping"
+  else
+    jq --arg cmd "$SESSION_HOOK_CMD" '
+      .hooks.SessionStart = [
+        .hooks.SessionStart[]? |
+        .hooks = [
+          .hooks[]? |
+          if ((.command // "") | contains("load_vault_context"))
+          then .command = $cmd else . end
+        ]
+      ]
+    ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+    green "   SessionStart hook updated to the interpreter-resolving wrapper"
+  fi
 else
   jq --arg cmd "$SESSION_HOOK_CMD" '
     .hooks = (.hooks // {}) |

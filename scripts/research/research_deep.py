@@ -353,6 +353,13 @@ def run_paid_deep(topic: str) -> int:
             "findings below are un-synthesized: they have not been reconciled against "
             "each other or against the vault. Treat them as raw input, and re-run "
             "`/research-deep` on this topic when the provider is reachable.\n"
+            # The banner above promises "findings below", so they have to actually be
+            # below it. Without this append the except branch wrote the banner alone
+            # and silently discarded every Phase 3 result, which is the one thing its
+            # own contract says must not happen (a Perplexity read timeout on
+            # 2026-09-23 lost 5 gap-fill queries and 3 Tavily extractions this way).
+            "\n## Raw Phase 3 findings (un-synthesized)\n\n"
+            f"{findings}\n"
         )}
 
     body = synth["text"]

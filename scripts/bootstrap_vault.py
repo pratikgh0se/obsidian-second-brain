@@ -17,6 +17,7 @@ Usage:
     python bootstrap_vault.py --path ~/my-vault --name "Your Name"
     python bootstrap_vault.py --path ~/my-vault --name "Your Name" --preset researcher
     python bootstrap_vault.py --path ~/my-vault --name "You" --mode assistant --subject "Boss Name"
+    python bootstrap_vault.py --path ~/my-vault --name "Your Name" --style wiki
 
 Options:
     --path        Path where the vault should be created (required)
@@ -28,9 +29,16 @@ Options:
     --jobs        Comma-separated list of jobs/companies (default: "Work")
                   Only used by the "default" preset.
     --no-sidebiz  Omit the side business module (default preset only)
+    --style       Folder layout: obsidian | wiki (default: obsidian)
+                  obsidian - Daily/, People/, Projects/ and the preset's topic folders
+                  wiki     - wiki/daily/, wiki/entities/, wiki/projects/, boards/, templates/
+                             A preset folder the wiki layout does not rename keeps
+                             its own name under wiki/ (Sources/ -> wiki/sources/),
+                             so every preset builds the same vault in either layout.
 """
 
 import argparse
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -70,6 +78,121 @@ WIKI_FOLDERS = {
     "{{DAILY_FOLDER}}":    "wiki/daily",
 }
 
+STYLES = ("obsidian", "wiki")
+
+# Obsidian-style preset folder -> its path in the wiki layout, following the
+# rows of references/folder-map.md (boards/ and templates/ come from the wiki
+# tree in references/vault-schema.md). This table carries the renames only: a
+# folder with no row keeps its own name under wiki/ (see _wiki_slug), so a
+# preset means the same vault in either layout and a folder added to a preset
+# later is not dropped from wiki-style vaults by default.
+WIKI_PATHS = {
+    "Daily": "wiki/daily",
+    "Dev Logs": "wiki/logs",
+    "Tasks": "wiki/tasks",
+    "Projects": "wiki/projects",
+    "People": "wiki/entities",
+    "Companies": "wiki/entities",
+    "Tools": "wiki/entities",
+    "Ideas": "wiki/concepts",
+    "Knowledge": "wiki/concepts",
+    "Synthesis": "wiki/concepts",
+    "Reviews": "wiki/reviews",
+    "Meetings": "wiki/meetings",
+    "Decisions": "wiki/decisions",
+    "Boards": "boards",
+    "Templates": "templates",
+    "_trash": "_trash",
+}
+
+WIKI_DESCRIPTIONS = {
+    "wiki/daily": "One note per day. Named `YYYY-MM-DD.md`",
+    "wiki/logs": "Dev and work session logs - dated, project-tagged",
+    "wiki/tasks": "Standalone task notes (linked from boards)",
+    "wiki/projects": "Active and archived projects",
+    "wiki/entities": "People, companies and tools - one note per entity",
+    "wiki/concepts": "Ideas, concepts, frameworks and synthesis",
+    "wiki/reviews": "Weekly and monthly reviews",
+    "wiki/meetings": "Meeting notes - one per meeting",
+    "wiki/decisions": "Decision records (ADRs)",
+    "boards": "Kanban boards",
+    "templates": "Note templates",
+}
+
+
+def _wiki_slug(name: str) -> str:
+    """The wiki-style path for a folder WIKI_PATHS does not rename: its own name,
+    lowercased, under wiki/. Each segment is slugged, so "Finances/Spending"
+    becomes wiki/finances/spending and "Reading Queue" becomes wiki/reading-queue."""
+    segments = [s.strip().lower().replace(" ", "-") for s in name.split("/") if s.strip()]
+    return "wiki/" + "/".join(segments)
+
+
+# Seed notes write_preset_extras writes into a preset's topic folders, as
+# (top folder, note name, Home link label). The Obsidian-style Home links these
+# in its navigation table; the wiki-style Home builds its links from this table,
+# so a vault in either layout links every note it ships.
+SEED_NOTES = {
+    "default": (
+        ("Goals", f"{YEAR} Goals", "🎯 Goals"),
+        ("Finances", "Income Streams", "💵 Income"),
+        ("Health", "Health Dashboard", "🏋️ Health"),
+        ("Mentions", "Mentions Log", "💬 Mentions"),
+        ("Content", "Content Calendar", "📅 Content"),
+    ),
+    "researcher": (
+        ("Reading Queue", "_Queue", "📚 Reading Queue"),
+    ),
+}
+
+
+def resolve_folder(name: str, style: str = "obsidian") -> str:
+    """Where a preset folder lives in the given layout. Obsidian style is the
+    preset's own name; wiki style is its WIKI_PATHS rename, or wiki/<name>."""
+    if style == "obsidian":
+        return name
+    return WIKI_PATHS.get(name) or _wiki_slug(name)
+
+
+def resolve_folders(folders: list[str], style: str = "obsidian") -> list[str]:
+    """A preset's folder list in the given layout: order kept, duplicates
+    collapsed (Ideas and Knowledge are both wiki/concepts)."""
+    return [path for path, _ in resolve_folder_pairs(folders, style)]
+
+
+def resolve_folder_pairs(folders: list[str], style: str = "obsidian") -> list[tuple[str, str]]:
+    """resolve_folders, keeping each path's preset folder beside it so callers
+    that describe a folder (the _CLAUDE.md map) still know what it was named."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for f in folders:
+        path = resolve_folder(f, style)
+        if path not in seen:
+            seen.add(path)
+            out.append((path, f))
+    return out
+
+
+def _dataview_sources(text: str, style: str) -> str:
+    """Point every `FROM "<Folder>"` query at that folder's path in the layout."""
+    if style == "obsidian":
+        return text
+    return re.sub(
+        r'FROM "([^"]+)"',
+        lambda m: f'FROM "{resolve_folder(m.group(1), style)}"',
+        text,
+    )
+
+
+def _writer(vault: Path, style: str):
+    """write() for a template or seed note addressed by its Obsidian-style path
+    ("Templates/Task.md", "Goals/2026 Goals.md"). The top folder is resolved for
+    the layout, so every preset's seed notes are written in either layout."""
+    def put(rel: str, content: str) -> None:
+        top, _, rest = rel.partition("/")
+        write(vault / resolve_folder(top, style) / rest, _dataview_sources(content, style))
+    return put
+
 
 # ── Preset definitions ────────────────────────────────────────────────────────
 # Each preset declares its folder list, kanban boards, _CLAUDE.md folder map,
@@ -90,7 +213,7 @@ PRESETS = {
     "default": {
         "purpose": "Life OS - work, personal, finances",
         "folders": [
-            "Daily", "Dev Logs", "Tasks", "Projects", "People",
+            "Daily", "Dev Logs", "Tasks", "Projects", "People", "Companies", "Tools",
             "Boards", "Knowledge", "Learning", "Ideas", "Content/LinkedIn", "Content/X",
             "Goals", "Health", "Finances/Spending", "Jobs", "Businesses",
             "Mentions", "Reviews", "Life Chapters", "Templates", "_trash",
@@ -104,7 +227,7 @@ PRESETS = {
     "executive": {
         "purpose": "Decisions, people, meetings, strategic planning",
         "folders": [
-            "Daily", "People", "Meetings", "Decisions", "OKRs",
+            "Daily", "People", "Companies", "Tools", "Meetings", "Decisions", "OKRs",
             "Projects", "Boards", "Knowledge", "Reviews",
             "Templates", "_trash",
         ],
@@ -114,7 +237,7 @@ PRESETS = {
     "builder": {
         "purpose": "Projects, dev logs, architecture, debugging",
         "folders": [
-            "Daily", "Projects", "Dev Logs", "Architecture", "Debugging",
+            "Daily", "Projects", "People", "Companies", "Tools", "Dev Logs", "Architecture", "Debugging",
             "Boards", "Knowledge", "Tasks", "Ideas",
             "Templates", "_trash",
         ],
@@ -124,7 +247,7 @@ PRESETS = {
     "creator": {
         "purpose": "Content calendar, ideas pipeline, audience, publishing",
         "folders": [
-            "Daily", "Content/LinkedIn", "Content/X", "Content/Blog",
+            "Daily", "People", "Companies", "Tools", "Content/LinkedIn", "Content/X", "Content/Blog",
             "Ideas", "Audience", "Publishing",
             "Boards", "Templates", "_trash",
         ],
@@ -135,7 +258,7 @@ PRESETS = {
         "purpose": "Sources, literature, hypotheses, methodology, synthesis",
         "folders": [
             "Daily", "Sources", "Literature", "Hypotheses", "Methodology",
-            "Synthesis", "Reading Queue", "Projects", "People",
+            "Synthesis", "Reading Queue", "Projects", "People", "Companies", "Tools",
             "Boards", "Templates", "_trash",
         ],
         "boards": [Board("Research", ["📚 Reading", "🔬 Processing", "🧬 Synthesized", "✅ Done"])],
@@ -223,12 +346,18 @@ kanban-plugin: board
 
 
 def folder_map_table(folders: list) -> str:
+    """Rows for the _CLAUDE.md folder map. Takes either plain paths or the
+    (path, preset folder) pairs resolve_folder_pairs returns: a wiki-style
+    folder that WIKI_PATHS does not rename is described by what it was named,
+    since `wiki/sources/` alone says nothing about what belongs in it."""
     descriptions = {
         "Daily": "One note per day. Named `YYYY-MM-DD.md`",
         "Dev Logs": "Technical work logs - dated, project-tagged",
         "Tasks": "Standalone task notes (linked from boards)",
         "Projects": "Active and archived projects",
         "People": "One note per person",
+        "Companies": "Companies I track - clients, vendors, counterparties",
+        "Tools": "Software and services in use",
         "Boards": "Kanban boards",
         "Knowledge": "Reference material",
         "Learning": "Books, courses, content consumed",
@@ -257,17 +386,21 @@ def folder_map_table(folders: list) -> str:
         "_trash": "Deleted notes (Obsidian default)",
     }
     rows = []
-    for f in folders:
+    for entry in folders:
+        f, origin = entry if isinstance(entry, tuple) else (entry, entry)
+        if f in WIKI_DESCRIPTIONS:
+            rows.append(f"| `{f}/` | {WIKI_DESCRIPTIONS[f]} |")
+            continue
         # Use top-level segment for description lookup
-        key = f.split("/")[0]
+        key = origin.split("/")[0]
         if key == "Content":
-            sub = f.split("/", 1)[1] if "/" in f else ""
+            sub = origin.split("/", 1)[1] if "/" in origin else ""
             desc = f"Content drafts for {sub}" if sub else "Content calendar and post drafts"
         elif key == "Finances":
-            sub = f.split("/", 1)[1] if "/" in f else ""
+            sub = origin.split("/", 1)[1] if "/" in origin else ""
             desc = f"Finance notes ({sub})" if sub else "Finance notes"
         elif key == "Side Biz":
-            sub = f.split("/", 1)[1] if "/" in f else ""
+            sub = origin.split("/", 1)[1] if "/" in origin else ""
             desc = f"Side business ({sub})" if sub else "Side business"
         else:
             desc = descriptions.get(key, "-")
@@ -276,8 +409,17 @@ def folder_map_table(folders: list) -> str:
 
 
 def claude_md_personal(name: str, preset_key: str, preset: dict, jobs: list, vault_path: Path,
-                       folders: list | None = None) -> str:
+                       folders: list | None = None, style: str = "obsidian") -> str:
     primary_job = jobs[0] if jobs else "Work"
+    boards, people = resolve_folder("Boards", style), resolve_folder("People", style)
+    tasks, dev_logs = resolve_folder("Tasks", style), resolve_folder("Dev Logs", style)
+    # The manual routes work to a topic folder only when this vault has one.
+    # Obsidian style keeps its previous behaviour; a wiki-style vault gets the
+    # routes when the preset carries those folders, which it now creates.
+    created = {e[1] for e in (folders or []) if isinstance(e, tuple)}
+    topic_folders = style == "obsidian" or {"Mentions", "Finances/Spending"} <= created
+    mentions_folder = resolve_folder("Mentions", style)
+    finances_folder = resolve_folder("Finances", style)
     # The map is the agent's ground truth for what is where, so build it from the
     # folders bootstrap actually creates (which may extend the preset, e.g. the
     # Side Biz tree) - and list no file it does not write: the default preset
@@ -287,13 +429,16 @@ def claude_md_personal(name: str, preset_key: str, preset: dict, jobs: list, vau
     if preset_key == "default":
         key_files = (
             "- **Dashboard:** `Home.md`\n"
-            f"- **Work Board:** `Boards/{primary_job}.md`\n"
-            "- **Personal Board:** `Boards/Personal.md`\n"
-            "- **Mentions Log:** `Mentions/Mentions Log.md`"
+            f"- **Work Board:** `{boards}/{primary_job}.md`\n"
+            f"- **Personal Board:** `{boards}/Personal.md`"
+            + (f"\n- **Mentions Log:** `{mentions_folder}/Mentions Log.md`" if topic_folders else "")
         )
     else:
-        board_lines = [f"- **{b.name} Board:** `Boards/{b.name}.md`" for b in preset["boards"]]
+        board_lines = [f"- **{b.name} Board:** `{boards}/{b.name}.md`" for b in preset["boards"]]
         key_files = "- **Dashboard:** `Home.md`\n" + "\n".join(board_lines)
+    mentions_rule = "- Mentions/recognition → Mentions Log + person's note + daily note\n" if topic_folders else ""
+    finances_rule = f"- Anything in {finances_folder}/ with personal financial data\n" if topic_folders else ""
+    mentions_row = "\n| Mention/recognition | Mentions Log + person's note + daily note |" if topic_folders else ""
 
     return f"""# Claude Operating Manual - {name}'s Vault
 
@@ -307,6 +452,7 @@ def claude_md_personal(name: str, preset_key: str, preset: dict, jobs: list, vau
 - **Owner:** {name}
 - **Preset:** {preset_key}
 - **Mode:** personal
+- **Vault style:** {style}
 - **Primary purpose:** {preset["purpose"]}
 - **Last updated:** {TODAY}
 
@@ -330,15 +476,13 @@ def claude_md_personal(name: str, preset_key: str, preset: dict, jobs: list, vau
 
 Claude should auto-save the following **without asking**:
 - Decisions made in conversation → relevant project note + daily note
-- New people mentioned → People/ (create stub if needed)
-- Tasks assigned or committed to → kanban board + Tasks/ note
-- Dev work done → Dev Logs/ + project note + daily note
-- Mentions/recognition → Mentions Log + person's note + daily note
-- Completed tasks → move on kanban to ✅ Done
+- New people mentioned → {people}/ (create stub if needed)
+- Tasks assigned or committed to → kanban board + {tasks}/ note
+- Dev work done → {dev_logs}/ + project note + daily note
+{mentions_rule}- Completed tasks → move on kanban to ✅ Done
 
 Claude should **ask before saving**:
-- Anything in Finances/ with personal financial data
-- Anything involving deleting or archiving an existing note
+{finances_rule}- Anything involving deleting or archiving an existing note
 
 ---
 
@@ -374,10 +518,9 @@ Done item:
 |---|---|
 | New project | Board (Backlog) + today's daily note |
 | Task done | Board (Done) + project note + daily note |
-| Dev session | Dev Logs/ + project note + daily note |
-| Person interaction | Daily note + their People/ note |
-| Decision made | Project note (Key Decisions) + daily note |
-| Mention/recognition | Mentions Log + person's note + daily note |
+| Dev session | {dev_logs}/ + project note + daily note |
+| Person interaction | Daily note + their {people}/ note |
+| Decision made | Project note (Key Decisions) + daily note |{mentions_row}
 
 ---
 
@@ -387,11 +530,12 @@ Done item:
 
 
 def claude_md_assistant(operator: str, subject: str, preset_key: str, preset: dict, vault_path: Path,
-                        folders: list | None = None) -> str:
+                        folders: list | None = None, style: str = "obsidian") -> str:
     # Same rule as claude_md_personal: the map documents the folders bootstrap
     # actually creates, not just the preset's base list.
     folder_table = folder_map_table(folders if folders is not None else preset["folders"])
-    board_lines = [f"- **{b.name} Board:** `Boards/{b.name}.md`" for b in preset["boards"]]
+    boards = resolve_folder("Boards", style)
+    board_lines = [f"- **{b.name} Board:** `{boards}/{b.name}.md`" for b in preset["boards"]]
     key_files = "- **Dashboard:** `Home.md`\n" + ("\n".join(board_lines) if board_lines else "")
 
     return f"""# Claude Operating Manual - {subject}'s Vault
@@ -408,6 +552,7 @@ def claude_md_assistant(operator: str, subject: str, preset_key: str, preset: di
 - **Vault path:** {vault_path}
 - **Preset:** {preset_key}
 - **Mode:** assistant
+- **Vault style:** {style}
 - **Primary purpose:** {preset["purpose"]}
 - **Last updated:** {TODAY}
 
@@ -487,24 +632,40 @@ Done item:
 """
 
 
-def render_home(name: str, preset_key: str, preset: dict, jobs: list, mode: str, subject: str = "") -> str:
+def render_home(name: str, preset_key: str, preset: dict, jobs: list, mode: str, subject: str = "",
+                style: str = "obsidian") -> str:
     title = f"{name}'s Life OS" if (preset_key == "default" and mode == "personal") else (
         f"{subject}'s Vault" if mode == "assistant" else f"{name}'s {preset_key.title()} Vault"
     )
+    daily = resolve_folder("Daily", style)
 
-    if preset_key == "default":
+    if style == "wiki":
+        # Boards, then every folder this preset has, then the seed notes the
+        # preset writes: a wiki-style vault creates those notes too, and a note
+        # nothing links is an orphan in its own health check.
+        board_names = (jobs + ["Personal"]) if preset_key == "default" else [b.name for b in preset["boards"]]
+        board_links = " · ".join(f"[[boards/{n}|📋 {n}]]" for n in board_names)
+        folder_links = " · ".join(f"📁 {p.split('/')[-1].replace('-', ' ').title()}"
+                                  for p in resolve_folders(preset["folders"], style)
+                                  if p not in ("boards", "templates", "_trash"))
+        seed_links = " · ".join(
+            f"[[{resolve_folder(folder, style)}/{note}|{label}]]"
+            for folder, note, label in SEED_NOTES.get(preset_key, ())
+        )
+        nav = f"{board_links}\n\n{folder_links}" + (f"\n\n{seed_links}" if seed_links else "")
+    elif preset_key == "default":
         primary_job = jobs[0] if jobs else "Work"
         nav = (
             "| Work | Life | System |\n"
             "|------|------|--------|\n"
-            f"| [[Boards/{primary_job}\\|📋 Work Board]] | [[Goals/{YEAR} Goals\\|🎯 Goals]] | [[Templates/\\|📝 Templates]] |\n"
+            f"| [[Boards/{primary_job}\\|📋 Work Board]] | [[Goals/{YEAR} Goals\\|🎯 Goals]] | 📝 Templates |\n"
             "| [[Boards/Personal\\|📋 Personal]] | [[Finances/Income Streams\\|💵 Income]] | [[Mentions/Mentions Log\\|💬 Mentions]] |\n"
-            "| [[Projects/\\|🔨 Projects]] | [[Health/Health Dashboard\\|🏋️ Health]] | [[People/\\|👥 People]] |\n"
-            "| [[Content/Content Calendar\\|📅 Content]] | [[Ideas/\\|💡 Ideas]] | [[Reviews/\\|📆 Reviews]] |"
+            "| 🔨 Projects | [[Health/Health Dashboard\\|🏋️ Health]] | 👥 People |\n"
+            "| [[Content/Content Calendar\\|📅 Content]] | 💡 Ideas | 📆 Reviews |"
         )
     else:
-        board_links = " · ".join(f"[[Boards/{b.name}\\|📋 {b.name}]]" for b in preset["boards"])
-        folder_links = " · ".join(f"[[{f.split('/')[0]}/\\|📁 {f.split('/')[0]}]]"
+        board_links = " · ".join(f"[[Boards/{b.name}|📋 {b.name}]]" for b in preset["boards"])
+        folder_links = " · ".join(f"📁 {f.split('/')[0]}"
                                   for f in preset["folders"]
                                   if "/" not in f and f not in ("Boards", "Templates", "_trash"))
         nav = f"{board_links}\n\n{folder_links}"
@@ -526,7 +687,7 @@ LIMIT 7
 const all = dv.pages("");
 dv.paragraph(`📝 **${all.length}** total notes`);
 ```
-"""
+""".replace('FROM "Daily"', f'FROM "{daily}"')
 
     return f"""---
 date: {TODAY}
@@ -552,9 +713,10 @@ aliases:
 """
 
 
-def write_core_templates(vault: Path):
+def write_core_templates(vault: Path, style: str = "obsidian"):
     """Templates shared by all presets."""
-    write(vault / "Templates/Daily Note.md", """---
+    put = _writer(vault, style)
+    put("Templates/Daily Note.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: daily
 tags:
@@ -622,7 +784,7 @@ Daily note for this date. Captures what was worked on, who was met, decisions ma
 **Tomorrow's #1 priority:**
 """)
 
-    write(vault / "Templates/Project.md", """---
+    put("Templates/Project.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: project
 tags:
@@ -669,7 +831,7 @@ LIMIT 5
 ```
 """)
 
-    write(vault / "Templates/Person.md", """---
+    put("Templates/Person.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: person
 tags:
@@ -714,7 +876,7 @@ LIMIT 15
 ```
 """)
 
-    write(vault / "Templates/Task.md", """---
+    put("Templates/Task.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: task
 tags:
@@ -744,7 +906,7 @@ Task note. Captures requirements, implementation notes, and what was delivered. 
 ## Related
 """)
 
-    write(vault / "Templates/Dev Log.md", """---
+    put("Templates/Dev Log.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: devlog
 tags:
@@ -774,10 +936,13 @@ Engineering log for this date. Captures what was worked on, problems solved, dec
 """)
 
 
-def write_preset_extras(vault: Path, preset_key: str):
-    """Preset-specific templates and seed files."""
+def write_preset_extras(vault: Path, preset_key: str, style: str = "obsidian"):
+    """Preset-specific templates and seed files. In a wiki-style vault the seed
+    notes that live in topic folders (Goals/, Mentions/, Finances/, Health/,
+    Content/, Reading Queue/) are skipped with their folders; templates are not."""
+    put = _writer(vault, style)
     if preset_key == "default":
-        write(vault / "Templates/Goal.md", f"""---
+        put("Templates/Goal.md", f"""---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: goal
 tags:
@@ -807,7 +972,7 @@ Goal note. Captures why this goal matters, success criteria, milestones, and pro
 ## Progress Log
 """)
 
-        write(vault / "Templates/Mention.md", """---
+        put("Templates/Mention.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: mention
 tags:
@@ -833,7 +998,7 @@ Mention note. Captures a moment when someone recognized work publicly (Slack, em
 ## My Takeaway
 """)
 
-        write(vault / f"Goals/{YEAR} Goals.md", f"""---
+        put(f"Goals/{YEAR} Goals.md", f"""---
 date: {TODAY}
 tags:
   - goal
@@ -849,7 +1014,7 @@ SORT progress DESC
 ```
 """)
 
-        write(vault / "Mentions/Mentions Log.md", f"""---
+        put("Mentions/Mentions Log.md", f"""---
 date: {TODAY}
 tags:
   - log
@@ -869,7 +1034,7 @@ SORT date DESC
 
         # Home.md's nav links this note - a fresh vault must not ship a
         # dangling wikilink (stress-test fix 9/24: the showroom rule).
-        write(vault / "Finances/Income Streams.md", f"""---
+        put("Finances/Income Streams.md", f"""---
 date: {TODAY}
 tags:
   - finance
@@ -884,7 +1049,7 @@ Track every income source here - salary, side business, one-off invoices.
 | Salary | monthly | active |
 """)
 
-        write(vault / "Health/Health Dashboard.md", f"""---
+        put("Health/Health Dashboard.md", f"""---
 date: {TODAY}
 tags:
   - health
@@ -904,7 +1069,7 @@ LIMIT 14
 ## Notes
 """)
 
-        write(vault / "Content/Content Calendar.md", f"""---
+        put("Content/Content Calendar.md", f"""---
 date: {TODAY}
 tags:
   - content
@@ -922,7 +1087,7 @@ SORT date DESC
         return
 
     if preset_key == "executive":
-        write(vault / "Templates/Meeting.md", """---
+        put("Templates/Meeting.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: meeting
 tags:
@@ -948,7 +1113,7 @@ Meeting note. Captures attendees, agenda, decisions, action items, and free-form
 
 ## Notes
 """)
-        write(vault / "Templates/Decision.md", """---
+        put("Templates/Decision.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: decision
 tags:
@@ -972,7 +1137,7 @@ Decision record (ADR). Captures the context, options considered, the decision, a
 
 ## Consequences
 """)
-        write(vault / "Templates/OKR.md", """---
+        put("Templates/OKR.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: okr
 tags:
@@ -1001,7 +1166,7 @@ OKR note. Captures the objective, key results, and progress over the quarter. Pu
         return
 
     if preset_key == "builder":
-        write(vault / "Templates/Architecture.md", """---
+        put("Templates/Architecture.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: architecture
 tags:
@@ -1026,7 +1191,7 @@ Architecture note. Captures the problem, constraints, design, tradeoffs, and ope
 
 ## Open Questions
 """)
-        write(vault / "Templates/Debug.md", """---
+        put("Templates/Debug.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: debug
 tags:
@@ -1055,7 +1220,7 @@ Bug investigation note. Captures the symptom, repro steps, investigation trail, 
         return
 
     if preset_key == "creator":
-        write(vault / "Templates/Post.md", """---
+        put("Templates/Post.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: post
 tags:
@@ -1080,7 +1245,7 @@ Content post note. Captures the hook, body, CTA, and platform variants for a pie
 
 ## Variants
 """)
-        write(vault / "Templates/Audience Note.md", """---
+        put("Templates/Audience Note.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: audience
 tags:
@@ -1106,7 +1271,7 @@ Audience segment note. Captures who they are, what they want, what they read, an
         return
 
     if preset_key == "researcher":
-        write(vault / "Templates/Source.md", """---
+        put("Templates/Source.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: source
 tags:
@@ -1130,7 +1295,7 @@ Source note (book, paper, podcast, video, article). Captures citation, abstract 
 
 ## Raw Notes
 """)
-        write(vault / "Templates/Literature Note.md", """---
+        put("Templates/Literature Note.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: literature
 tags:
@@ -1156,7 +1321,7 @@ Literature note. Distillation of one source's key claims, methodology, critique,
 
 ## Connections
 """)
-        write(vault / "Templates/Hypothesis.md", """---
+        put("Templates/Hypothesis.md", """---
 date: <% tp.date.now("YYYY-MM-DD") %>
 type: hypothesis
 tags:
@@ -1182,7 +1347,7 @@ Hypothesis note. Captures a testable statement, predictions, evidence for and ag
 
 ## Verdict
 """)
-        write(vault / "Reading Queue/_Queue.md", f"""---
+        put("Reading Queue/_Queue.md", f"""---
 date: {TODAY}
 tags:
   - queue
@@ -1200,13 +1365,14 @@ SORT date DESC
 
 
 def bootstrap(vault: Path, name: str, preset_key: str, mode: str, subject: str,
-              jobs: list, include_sidebiz: bool):
+              jobs: list, include_sidebiz: bool, style: str = "obsidian"):
     preset = PRESETS[preset_key]
 
     print(f"\n🧠 Bootstrapping vault: {vault}")
     print(f"   Owner: {name}")
     print(f"   Preset: {preset_key}")
     print(f"   Mode: {mode}{' (subject: ' + subject + ')' if mode == 'assistant' else ''}")
+    print(f"   Style: {style}")
     if preset_key == "default":
         print(f"   Jobs: {', '.join(jobs)}")
     print()
@@ -1215,6 +1381,10 @@ def bootstrap(vault: Path, name: str, preset_key: str, mode: str, subject: str,
     folders = list(preset["folders"])
     if preset_key == "default" and include_sidebiz:
         folders += ["Side Biz/Deals/Location1", "Side Biz/Deals/Location2"]
+    # Pairs, not paths: the _CLAUDE.md map describes a wiki-style folder by the
+    # preset folder it came from.
+    folder_pairs = resolve_folder_pairs(folders, style)
+    folders = [path for path, _ in folder_pairs]
 
     for f in folders:
         (vault / f).mkdir(parents=True, exist_ok=True)
@@ -1223,29 +1393,44 @@ def bootstrap(vault: Path, name: str, preset_key: str, mode: str, subject: str,
     # ── _CLAUDE.md ────────────────────────────────────────────────────────────
     if mode == "assistant":
         write(vault / "_CLAUDE.md",
-              claude_md_assistant(name, subject, preset_key, preset, vault, folders=folders))
+              claude_md_assistant(name, subject, preset_key, preset, vault, folders=folder_pairs, style=style))
     else:
         write(vault / "_CLAUDE.md",
-              claude_md_personal(name, preset_key, preset, jobs, vault, folders=folders))
+              claude_md_personal(name, preset_key, preset, jobs, vault, folders=folder_pairs, style=style))
+
+    # ── .claude/CLAUDE.md: native import of the manual ─────────────────────────
+    # Claude Code loads a CLAUDE.md found from the working directory and follows
+    # its @imports, with a 4 MiB limit and no interpreter involved. That makes it
+    # the reliable way to put _CLAUDE.md in front of a session: the SessionStart
+    # hook is capped at 10,000 characters of context, and a real manual outgrows
+    # that (#270). The hook still runs - it publishes the skill root, which no
+    # import can - and skips the manual when this file has already loaded it.
+    (vault / ".claude").mkdir(exist_ok=True)
+    write(vault / ".claude" / "CLAUDE.md",
+          "# Vault operating manual\n\n"
+          "The manual lives at the vault root so every agent surface can find it.\n"
+          "This import loads it in full for Claude Code sessions started here.\n\n"
+          "@../_CLAUDE.md\n")
 
     # ── Home ──────────────────────────────────────────────────────────────────
-    write(vault / "Home.md", render_home(name, preset_key, preset, jobs, mode, subject))
+    write(vault / "Home.md", render_home(name, preset_key, preset, jobs, mode, subject, style=style))
 
     # ── Kanban Boards ─────────────────────────────────────────────────────────
+    boards = vault / resolve_folder("Boards", style)
     if preset_key == "default":
         for job in jobs:
-            write(vault / f"Boards/{job}.md", render_kanban(preset["kanban_columns"]))
-        write(vault / "Boards/Personal.md", render_kanban(["📥 Backlog", "📋 This Week", "✅ Done"]))
+            write(boards / f"{job}.md", render_kanban(preset["kanban_columns"]))
+        write(boards / "Personal.md", render_kanban(["📥 Backlog", "📋 This Week", "✅ Done"]))
     else:
         for board_name, columns in preset["boards"]:
-            write(vault / f"Boards/{board_name}.md", render_kanban(columns))
+            write(boards / f"{board_name}.md", render_kanban(columns))
 
     # ── Templates ─────────────────────────────────────────────────────────────
-    write_core_templates(vault)
-    write_preset_extras(vault, preset_key)
+    write_core_templates(vault, style)
+    write_preset_extras(vault, preset_key, style)
 
     # ── Bases ─────────────────────────────────────────────────────────────────
-    write_bases(vault, style="obsidian", preset_folders=folders)
+    write_bases(vault, style=style, preset_folders=folders)
     print("📊 Bases created")
 
     # ── .obsidian stub ────────────────────────────────────────────────────────
@@ -1303,6 +1488,11 @@ def main():
     parser.add_argument("--subject", default="", help="Subject name (required when --mode=assistant)")
     parser.add_argument("--jobs", default="Work", help="Comma-separated job/company names (default preset only)")
     parser.add_argument("--no-sidebiz", action="store_true", help="Omit side business module (default preset only)")
+    parser.add_argument("--style", default="obsidian", choices=list(STYLES),
+                        help="Folder layout: obsidian (Daily/, People/, ...) or wiki "
+                             "(wiki/daily/, wiki/entities/, ...). A preset folder the wiki "
+                             "layout does not rename keeps its own name under wiki/, e.g. "
+                             "Sources/ -> wiki/sources/ (default: obsidian)")
     parser.add_argument("--force", action="store_true",
                         help="Overwrite existing files (default: keep anything already in the vault)")
     args = parser.parse_args()
@@ -1322,7 +1512,7 @@ def main():
 
     jobs = [j.strip() for j in args.jobs.split(",") if j.strip()]
     bootstrap(vault, args.name, args.preset, args.mode, args.subject,
-              jobs, include_sidebiz=not args.no_sidebiz)
+              jobs, include_sidebiz=not args.no_sidebiz, style=args.style)
 
 
 if __name__ == "__main__":

@@ -42,10 +42,27 @@ def mine(repo: str, limit: int) -> list[dict]:
     out = subprocess.run(
         ["git", "-C", repo, "log", f"-n{limit}", "--no-merges",
          "--pretty=format:%h%x1f%ad%x1f%s", "--date=short"],
+        # git writes commit messages as UTF-8; decoding them with the locale
+        # codepage instead breaks two ways on Windows. A codepage that maps every
+        # byte (cp1252) turns a CJK subject into mojibake silently, and a
+        # multibyte one (cp950, cp932) raises - on subprocess's reader thread, so
+        # the thread dies, run() still returns 0, and stdout is left None. That
+        # surfaced as AttributeError on the splitlines() below, with nothing
+        # pointing at an encoding problem (#294). conformance_report.py already
+        # passes these two arguments for the same reason.
         capture_output=True, text=True, check=False,
+        encoding="utf-8", errors="replace",
     )
     if out.returncode != 0:
         raise SystemExit(f"git log failed: {out.stderr.strip()}")
+    if out.stdout is None:
+        # Belt and braces: errors="replace" removes the known cause, but a reader
+        # thread that dies for any other reason still yields None, and a clear
+        # message beats an AttributeError three frames away.
+        raise SystemExit(
+            f"git log produced no decodable output for {repo!r} "
+            "(the child's stdout could not be read)"
+        )
     candidates = []
     for line in out.stdout.splitlines():
         parts = line.split("\x1f")

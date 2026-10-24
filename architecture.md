@@ -10,8 +10,8 @@ Last reviewed against commit `ff0319c` (2026-06-05).
 
 obsidian-second-brain is a cross-CLI **skill** (not a plugin, not a hosted service) that turns any Obsidian vault into an AI-first second brain. One platform-neutral command source compiles to eight AI CLIs - Claude Code, Codex CLI, Gemini CLI, OpenCode, Antigravity, Hermes, Pi, Grok Bot - through a build-time adapter pattern. At runtime a slash command reads and writes the user's vault as plain markdown; commands shell out to Python helpers for anything deterministic (vault health, research fetches, codebase scans).
 
-- **47 commands**, grouped by `category:` frontmatter: vault 16, thinking 14, research 8, meta 9.
-- **46 commands are cross-platform.** Only `/obsidian-calendar` carries `exclude: [codex-cli, gemini-cli, opencode, hermes, pi, agent-skills, grok-bot]` because it depends on the Google Calendar MCP, so it ships on Claude Code only. The Codex / Gemini / OpenCode / Hermes / Pi / Agent Skills / Grok Bot builds ship 45.
+- **49 commands**, grouped by `category:` frontmatter: vault 17, thinking 14, research 8, meta 10.
+- **47 commands are cross-platform.** Only `/obsidian-calendar` carries `exclude: [codex-cli, gemini-cli, opencode, hermes, pi, agent-skills, grok-bot]` because it depends on the Google Calendar MCP, so it ships on Claude Code only. The Codex / Gemini / OpenCode / Hermes / Pi / Agent Skills / Grok Bot builds ship 47.
 - A research toolkit that is key-less by default (free public sources) and uses Grok + Perplexity + Gemini when keys are present.
 - An opt-in background agent plus optional user-scheduled agents.
 - MIT licensed.
@@ -38,7 +38,7 @@ The AI-first vault rule ties it all together: every note a command writes is des
 
 | Path | Role |
 |---|---|
-| `commands/` | 47 slash-command definitions, one `.md` each. The platform-neutral source and the product surface. |
+| `commands/` | 49 slash-command definitions, one `.md` each. The platform-neutral source and the product surface. |
 | `references/` | Shared specs the commands link to. `ai-first-rules.md` is the canonical, non-negotiable vault-write spec. |
 | `scripts/` | Python and Shell engine: build orchestrator, vault tooling, research toolkit, codebase scanner. |
 | `adapters/` | Platform translation layer. `lib.sh` plus one `adapter.sh` per CLI. |
@@ -98,20 +98,20 @@ Vault management: saving, organizing, searching, scheduling, maintaining.
 
 `/obsidian-save` `/obsidian-daily` `/obsidian-log` `/obsidian-task` `/obsidian-person` `/obsidian-capture` `/obsidian-catchup` `/obsidian-find` `/obsidian-recap` `/obsidian-board` `/obsidian-board-hygiene` `/obsidian-project` `/obsidian-projects` `/obsidian-recurring` `/obsidian-world` `/obsidian-calendar` (Claude Code + Pi only)
 
-### Thinking (13)
+### Thinking (14)
 Use vault history to generate insight, challenge assumptions, surface patterns, and record decisions.
 
-`/obsidian-challenge` `/obsidian-emerge` `/obsidian-connect` `/obsidian-graduate` `/obsidian-decide` `/obsidian-distill` `/obsidian-reconcile` `/obsidian-review` `/obsidian-synthesize` `/obsidian-learn` `/obsidian-panel` `/idea-discovery` `/vault-deep-synthesis`
+`/obsidian-challenge` `/obsidian-emerge` `/obsidian-connect` `/obsidian-graduate` `/obsidian-decide` `/obsidian-distill` `/obsidian-reconcile` `/obsidian-review` `/obsidian-synthesize` `/obsidian-learn` `/obsidian-panel` `/obsidian-brainstorm` `/idea-discovery` `/vault-deep-synthesis`
 
 ### Research (8)
 AI-powered research and ingestion; findings save to the vault following the AI-first rule.
 
 `/research` `/research-deep` `/notebooklm` `/x-read` `/x-pulse` `/youtube` `/podcast` `/obsidian-ingest`
 
-### Meta (7)
-Bootstrap, audit, export, visualize, document, and extend the system itself.
+### Meta (10)
+Bootstrap, audit, export, visualize, document, coordinate agents, and extend the system itself.
 
-`/obsidian-init` `/obsidian-health` `/obsidian-export` `/obsidian-visualize` `/obsidian-retrieval-eval` `/obsidian-architect` `/create-command`
+`/obsidian-init` `/obsidian-health` `/obsidian-export` `/obsidian-visualize` `/obsidian-retrieval-eval` `/obsidian-architect` `/obsidian-merge` `/obsidian-reindex` `/crew` `/create-command`
 
 ---
 
@@ -141,6 +141,19 @@ Lives under `scripts/research/`. One Python entry point per research command plu
 Configuration is read from the environment or `~/.config/obsidian-second-brain/.env`; `OBSIDIAN_VAULT_PATH` is required so notes save to the right vault on any machine.
 
 Python dependencies (`pyproject.toml`, managed via `uv`): `openai`, `requests`, `python-dotenv`, `youtube-transcript-api`, `google-api-python-client`, `google-genai`, `feedparser`.
+
+---
+
+## Crew (shared agent logbook)
+
+Crew is the one command that runs without a vault. `scripts/crew.py` is a single standard-library Python file, so it needs no `uv` environment.
+
+- **Storage.** One markdown file per day (`YYYY-MM-DD.md`, one line per job: time, agent, area, outcome, evidence) and one `lessons.md` table. The folder is `--dir`, then `CREW_DIR`, then the saved setup, then the vault's `wiki/team/`, then `~/crew`.
+- **Writes.** Every write takes a sidecar lock (`.crew.lock`) and replaces the file atomically. Inputs are cleaned to one line, `|` is replaced, and `<` / `>` are escaped so a record cannot forge a marker.
+- **Reads.** `show --new` keeps a cursor per agent and session under `.crew-readers/`. It returns the newest 50 unread records and counts the older ones. Every read starts with a records-not-instructions header.
+- **Setup.** `/crew setup` copies the helper to `~/.config/crew/`, then merges read hooks: Claude Code and Codex on `SessionStart` + `UserPromptSubmit`, Cursor on `sessionStart` + `postToolUse` (`additional_context` JSON). It replaces only hook commands it recorded itself and only its own marked rules sections. Grok Bot gets a profile block to paste.
+- **Lessons.** A lesson stays `open` until a human runs `keep` or `drop`. `keep` writes a marked section into that agent's rules file (`CLAUDE.md`, `AGENTS.md`, `crew.mdc`, or the Grok Bot profile draft).
+- **No loop.** Crew starts no scheduler, daemon, or message sender. Agents read the log when their own hooks fire.
 
 ---
 
