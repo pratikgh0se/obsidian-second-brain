@@ -556,7 +556,7 @@ def _iter_all_notes(vault: Path):
 _BATCH_WRITE = 25
 
 
-def _atomic_write_index(index_path: Path, payload: dict) -> None:
+def _atomic_write_index(index_path: Path, out: dict) -> None:
     """Write the index via temp file + rename, so it is never half-written.
 
     A reader (search, vault_health, the MCP server) either sees the previous
@@ -565,7 +565,7 @@ def _atomic_write_index(index_path: Path, payload: dict) -> None:
     """
     tmp = index_path.with_name(index_path.name + f".tmp{os.getpid()}")
     try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
         tmp.replace(index_path)
     finally:
         if tmp.exists():
