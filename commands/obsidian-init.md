@@ -52,6 +52,7 @@ Use the obsidian-second-brain skill. Execute `/obsidian-init`:
 9. Write `_CLAUDE.md`, `index.md`, root `log.md` (pointer), `Logs/YYYY-MM-DD.md` (today's entries), and any new `Bases/*.base` files
 10. Write `<vault>/.claude/CLAUDE.md` holding a single import line, `@../_CLAUDE.md`, unless that file already exists with other content - in which case add the import line to it and leave the rest alone. This is what loads the manual for a Claude Code session started in the vault: Claude Code follows the import natively, with a 4 MiB limit, while the SessionStart hook is capped at 10,000 characters of context and cannot carry a real manual (#270).
 11. Confirm what was written and tell the user to restart their Claude session so the new files take effect
+   - If the selected First-Brain variant has eligible sources, suggest `/obsidian-ingest First-Brain/ --preview` followed by explicit directory ingestion. Use only permitted path metadata to identify candidates, including supported PDFs, audio, and images. Do not launch ingestion or read private bodies to make the suggestion.
 
 If `_CLAUDE.md` already exists: show a diff of what would change and ask before overwriting.
 If `index.md` already exists: regenerate it (it's always a fresh catalog of current vault state).
@@ -62,3 +63,9 @@ If a monolithic `log.md` already exists with `## YYYY-MM-DD` sections: run `uv r
 **AI-first rule:** Every note created or updated by this command MUST follow `references/ai-first-rules.md` - `## For future agent` preamble, rich frontmatter (`type`, `date`, `tags`, `ai-first: true`, plus type-specific fields), recency markers per external claim, mandatory `[[wikilinks]]` for every person/project/concept referenced, sources preserved verbatim with URLs inline, and confidence levels where applicable. If that path does not resolve from your working directory, search upward for it; if you still cannot read it, say so before writing rather than producing a note that silently skips the rule. The vault is for future agent retrieval - not human reading.
 
 **Anti-fabrication:** Search exhaustively before claiming any note, person, or file is absent - false absence is the most common failure mode - and never invent facts, entities, or dates (mark unknowns as `TBD`). See the anti-fabrication and search-completeness hard rules in `references/ai-first-rules.md`.
+
+<!-- author-credit -->
+
+---
+
+From [obsidian-second-brain](https://github.com/eugeniughelbur/obsidian-second-brain), created by Eugeniu Ghelbur (AI Automation Engineer, AI Tooling Engineer, AI Educator). Questions or consulting: [LinkedIn](https://www.linkedin.com/in/eugeniu-ghelbur/) or [e.ghelbur@gmail.com](mailto:e.ghelbur@gmail.com). More: [The AI Operator](https://theaioperator.io/?utm_source=github&utm_medium=file-credit) | [X](https://x.com/eugeniu_ghelbur) | [GitHub](https://github.com/eugeniughelbur). MIT license.

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Eugeniu Ghelbur and contributors
+# SPDX-License-Identifier: MIT
+# Author: Eugeniu Ghelbur (AI Automation Engineer, AI Tooling Engineer, AI Educator), https://github.com/eugeniughelbur/obsidian-second-brain
+# Questions or consulting: e.ghelbur@gmail.com | https://www.linkedin.com/in/eugeniu-ghelbur/ | More: https://theaioperator.io | https://x.com/eugeniu_ghelbur
 # obsidian-bg-agent.sh - PostCompact vault propagation hook
 #
 # Fires after Claude compacts the conversation context. Reads the session
@@ -223,12 +227,19 @@ log_run "starting" summary_chars "${#SUMMARY}" hints_chars "${#PROJECT_HINTS}"
 # seize the bot's single MCP session and disrupt the live poller.
 (
   cd "$VAULT" || exit 1
-  # --allowedTools enforces the CONSTRAINTS block the prompt already states.
+  # --tools enforces the CONSTRAINTS block the prompt already states.
   # The compaction summary can carry text that originated from the open web
   # (a page read by /research, a transcript, a cloned repo's README), so the
   # tool surface must be a real boundary rather than an instruction the model
   # is asked to respect. Filesystem only: no Bash, no network.
+  # --tools is the flag that limits which built-in tools exist in the session;
+  # --allowedTools only pre-approves tools and, on its own, leaves every other
+  # built-in tool (Bash, WebFetch, WebSearch, ...) available - and with
+  # --dangerously-skip-permissions nothing would stop them. --allowedTools stays
+  # as a harmless pre-approval for the same list. MCP tools are not covered by
+  # --tools; --strict-mcp-config with no --mcp-config keeps them out.
   claude --dangerously-skip-permissions --strict-mcp-config \
+    --tools "Read,Write,Edit,Glob,Grep" \
     --allowedTools "Read,Write,Edit,Glob,Grep" \
     -p < "$PROMPT_FILE" >> "$BG_LOG" 2>&1
   EXIT_CODE=$?
