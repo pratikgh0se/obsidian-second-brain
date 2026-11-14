@@ -76,12 +76,8 @@ Scan the structure to understand: folder names, template locations, naming conve
 
 ### 3. Bootstrap a new vault
 
-If the user has no vault yet, run:
+If the user has no vault yet, bootstrap it from the local copy of the skill. The skill is already installed if you are reading this file, so never pipe a remote install script into a shell on the user's behalf.
 ```bash
-# One-line install + bootstrap (asks 3 questions: vault path, your name, preset)
-curl -sL https://raw.githubusercontent.com/eugeniughelbur/obsidian-second-brain/main/scripts/quick-install.sh | bash
-
-# Or manual:
 python scripts/bootstrap_vault.py --path ~/path/to/vault --name "Your Name"
 
 # With a preset:
@@ -750,12 +746,16 @@ A guided conversation (intent, name, category, trigger phrases, behavior steps, 
 
 **Ingests a source into the vault - one source touches many pages.** Full steps in `commands/obsidian-ingest.md` (the source of truth). Read that file before running an ingest; the summary here is an orientation, not the procedure.
 
+Directories use the same workflow in bounded sequential batches: `/obsidian-ingest Sources/ --preview`, then `/obsidian-ingest Sources/ --batch-size 10`. Supported local text, PDF, audio, and image formats are discovered recursively after exclusions; read permissions are resolved before hashing or extraction. One hidden completion comment is appended to the existing operation log only after all required approvals and structural updates finish. Repeat the same command to continue or retry unfinished work, reusing raw captures. Errors and pending approvals are reported without persistent status tracking. Run only one folder ingestion per vault at a time; the helper has no active-session tracking or locking. Preserve source bytes and paths, resolve overlapping output routes before writing, and pass source protection to every worker. Warm start is `/obsidian-ingest First-Brain/` and requires no separate command. See the command's completion format and recovery rules rather than treating raw-capture existence as completion.
+
 In the First-Brain variant, read the selected local source in place, preserve its bytes and path, and record its vault-relative `source_path` in the raw capture. Derived and ancillary writes follow the manual's routes; conflicts involving human originals are recorded in the derived layer. Sensitive-content rules and the current rewrite policy still apply.
+
+Word/OpenDocument text files (`.docx`, `.doc`, `.odt`) follow the same local-source rules as other files. Use `scripts/document_to_pdf.py` to convert the selected in-vault document to a temporary PDF, then use the existing PDF reading step. Requires Python 3.10+ and LibreOffice 26.2+ (`soffice` on PATH or `--soffice`). Comments and revision markup are excluded. The original remains the source under the existing provenance rules. See the command for invocation and cleanup.
 
 Steps:
 1. Accept a URL, file path, or pasted text as the source
-2. Classify the source type before full read: article, PDF, transcript, video, or raw text
-3. Read or fetch the full source content
+2. Classify the source type before full read: article, PDF/text document, transcript, video, or raw text
+3. Read or fetch the full source content; convert `.docx`, `.doc`, and `.odt` to PDF before the shared PDF step
 4. Extract: entities (people, companies, tools), concepts, claims, action items, notable quotes
 5. Save the raw source to `raw/articles/YYYY-MM-DD - Source Title.md` (or `transcripts/`, `pdfs/`, `videos/`), verbatim and immutable, with `type: source` frontmatter and a `content_hash` over the canonical text. Check `raw/` for that hash and for the same normalized `source_url` first: a source already in the vault gets no second raw note, and the run becomes a re-read
 6. REWRITE the vault. Adding pages is not enough. Spawn parallel subagents (entities, projects, ideas, concepts, contradictions) that make existing pages smarter, more connected, and more current
@@ -955,7 +955,7 @@ If `index.md` doesn't exist, offer to run `/obsidian-init` to generate it.
 
 ## Research Commands
 
-Seven commands that pull external knowledge into the vault - X posts, X discourse, web research with citations, vault-grounded synthesis, YouTube videos, and podcast episodes (plus `/obsidian-ingest` above for arbitrary URLs, PDFs, audio, and screenshots). All output AI-first notes per the vault's Section 0 rule (preamble, rich frontmatter, recency markers, mandatory wikilinks, sources verbatim).
+Seven commands that pull external knowledge into the vault - X posts, X discourse, web research with citations, vault-grounded synthesis, YouTube videos, and podcast episodes (plus `/obsidian-ingest` above for arbitrary URLs, PDFs, Word/OpenDocument text files, audio, and screenshots). All output AI-first notes per the vault's Section 0 rule (preamble, rich frontmatter, recency markers, mandatory wikilinks, sources verbatim).
 
 **Setup:** API keys live at `~/.config/obsidian-second-brain/.env`. Run `install.sh` and answer "y" to the research toolkit prompt, or copy `.env.example` manually. The xAI Grok key is required for `/x-read` and `/x-pulse`. Perplexity is optional: with no `PERPLEXITY_API_KEY` set, `/research` and `/research-deep` fall back to free key-less sources automatically, and `--free` forces that path even when a key exists (`--academic` restricts it to scholarly sources). YouTube key is optional; transcripts work without it. Never tell a user a research command is unavailable because they lack a Perplexity key.
 
@@ -1239,8 +1239,14 @@ claude -p "/obsidian-daily"
 
 # Right - read the command file and execute its steps:
 cd "$VAULT" && claude --dangerously-skip-permissions \
+  --tools "Read,Write,Edit,Glob,Grep" \
   -p "Read ~/.claude/commands/obsidian-daily.md and carry out its instructions exactly."
 ```
+
+`--tools` limits which built-in tools exist in the run. Do not rely on `--allowedTools`
+alone: it only pre-approves tools, so with `--dangerously-skip-permissions` every other
+tool (Bash, web fetch, web search) would still be available. Widen the `--tools` list only
+if the command you schedule genuinely needs more.
 
 Because `~/.claude/commands/obsidian-daily.md` is symlinked from this repo (see Testing
 locally in the README), a scheduled run always uses the current command logic. Export an
@@ -1396,3 +1402,9 @@ The default install path (`scripts/setup.sh`) writes `OBSIDIAN_VAULT_PATH` into 
 - `scripts/vault_health.py` - Audit a vault for structural issues
 - `scripts/checkin.py` - Pick old people and project notes, keep the open check-in questions in `<vault>/.checkin.json`, render the cards, stamp `last-checked` (used by `/obsidian-checkin`)
 - `scripts/check_notes.py` - Run the write-time AI-first hook over a list of notes, for hosts with no hook runtime (Grok Bot, cron agents); `--fix` rewrites banned characters, exit 1 on anything left
+
+<!-- author-credit -->
+
+---
+
+From [obsidian-second-brain](https://github.com/eugeniughelbur/obsidian-second-brain), created by Eugeniu Ghelbur (AI Automation Engineer, AI Tooling Engineer, AI Educator). Questions or consulting: [LinkedIn](https://www.linkedin.com/in/eugeniu-ghelbur/) or [e.ghelbur@gmail.com](mailto:e.ghelbur@gmail.com). More: [The AI Operator](https://theaioperator.io/?utm_source=github&utm_medium=file-credit) | [X](https://x.com/eugeniu_ghelbur) | [GitHub](https://github.com/eugeniughelbur). MIT license.

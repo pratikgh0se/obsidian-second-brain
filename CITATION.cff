@@ -20,14 +20,14 @@ abstract: >
 authors:
   - family-names: "Ghelbur"
     given-names: "Eugeniu"
-    affiliation: "Single Grain"
     email: "e.ghelbur@gmail.com"
+    website: "https://github.com/eugeniughelbur"
 type: software
 license: MIT
 repository-code: "https://github.com/eugeniughelbur/obsidian-second-brain"
 url: "https://github.com/eugeniughelbur/obsidian-second-brain"
-version: "0.19.0"
-date-released: "2026-10-24"
+version: "0.20.0"
+date-released: "2026-10-25"
 keywords:
   - claude-code
   - claude-ai

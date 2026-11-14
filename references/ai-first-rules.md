@@ -291,13 +291,16 @@ date: YYYY-MM-DD
 type: source
 tags: [source, <article|transcript|pdf|video>]
 source_url: ""                # verbatim
-source_path: ""               # optional: local source's vault-relative POSIX path
+source_path: ""               # local source: vault-relative POSIX path, absolute outside vault
+source_file_hash: ""          # optional: full SHA-256 of original file bytes for directory ingestion
 source_type: article
 content_hash: ""
 capture_scope: full-local     # full-local | bounded-local | url-only
 source_quality: medium        # high | medium | speculation
 ai-first: true
 ```
+
+`source_file_hash` identifies the original file version, including binary inputs. It is separate from canonical `content_hash`, which identifies the retained text. Directory ingestion records only completed source versions in existing operation logs; unfinished work is retried using retained captures. A raw capture alone does not establish completion. See `commands/obsidian-ingest.md` for the receipt format and recovery procedure.
 
 **`capture_scope` says what the vault actually kept (#194).** A populated `source_url` proves where a claim came from, not that the evidence is still readable: the page can die, or quietly stop saying what the note relied on. The three values are about retention, never about quality:
 
@@ -315,7 +318,7 @@ A vault that has decided a locator is not a source sets `"source_policy": "stric
 - `medium` - provenance is traceable from signals capture already had: a named author or channel, a publication date, a stable URL, a repository owner.
 - `speculation` - the floor. Provenance unknown, derived (a summary of a summary) or conflicting. An uninvestigated source is `speculation`, which is the honest default and not an error state.
 
-The exact signals, and the rule that makes a label checkable by reading the note, are in `references/source-quality-check.md`. The field says nothing about whether the claims are true. `/obsidian-health` warns when a note cites only `speculation` sources; `"source_quality_policy": "silent"` in `.vault-config.json` mutes that, and no value blocks a capture.
+The exact signals, and the rule that makes a label checkable by reading the note, are in `references/source-quality-check.md`. The field says nothing about whether the claims are true. `/obsidian-health` warns when a note cites only `speculation` sources; `"source_quality_policy": "silent"` in `.vault-config.json` mutes that, and no value blocks a capture. At compile time, `/obsidian-ingest` and `/obsidian-synthesize` treat a `speculation` source as a proposal: it never rewrites an existing note on its own, even in `unattended` mode.
 
 ## Documented exceptions
 
@@ -611,3 +614,9 @@ When auditing an existing note (Phase 2 work or one-off cleanup), verify:
 ## Migration Note
 
 This rule was established 2026-04-25 and shipped as part of obsidian-second-brain v0.5.0 (Research Toolkit). All 5 research commands (`/x-read`, `/x-pulse`, `/research`, `/research-deep`, `/youtube`) follow it from day one. The 26 existing `/obsidian-*` commands were updated in v0.6.0 (Phase 2) to explicitly reference this document. Notes written before that may not yet meet the standard - `/obsidian-health` flags them.
+
+<!-- author-credit -->
+
+---
+
+From [obsidian-second-brain](https://github.com/eugeniughelbur/obsidian-second-brain), created by Eugeniu Ghelbur (AI Automation Engineer, AI Tooling Engineer, AI Educator). Questions or consulting: [LinkedIn](https://www.linkedin.com/in/eugeniu-ghelbur/) or [e.ghelbur@gmail.com](mailto:e.ghelbur@gmail.com). More: [The AI Operator](https://theaioperator.io/?utm_source=github&utm_medium=file-credit) | [X](https://x.com/eugeniu_ghelbur) | [GitHub](https://github.com/eugeniughelbur). MIT license.

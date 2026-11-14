@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Eugeniu Ghelbur and contributors
+# SPDX-License-Identifier: MIT
+# Author: Eugeniu Ghelbur (AI Automation Engineer, AI Tooling Engineer, AI Educator), https://github.com/eugeniughelbur/obsidian-second-brain
+# Questions or consulting: e.ghelbur@gmail.com | https://www.linkedin.com/in/eugeniu-ghelbur/ | More: https://theaioperator.io | https://x.com/eugeniu_ghelbur
 # =============================================================================
 # adapters/hermes/adapter.sh - Nous Research Hermes Agent platform adapter
 # =============================================================================
@@ -52,7 +56,7 @@ adapter_build() {
   _hermes_emit_hooks_doc "$dst"
 }
 
-# Copy the Hermes lifecycle-hook artifacts (the on_session_end maintenance script
+# Copy the Hermes lifecycle-hook artifacts (the on_session_finalize maintenance script
 # and its ~/.hermes/config.yaml hooks-block template) into the build.
 _hermes_copy_hooks() {
   local src="$1" dst="$2"
@@ -242,7 +246,7 @@ _hermes_write_blueprint() {
 }
 
 # Box 4 - the lifecycle-hook story. Shell hooks are declared under `hooks:` in
-# ~/.hermes/config.yaml and fire on plugin events like on_session_end; the
+# ~/.hermes/config.yaml and fire on plugin events like on_session_finalize; the
 # nightly cron job is the cron-native substitute for the Claude PostCompact
 # maintenance pass.
 _hermes_emit_hooks_doc() {
@@ -285,15 +289,16 @@ None of them delete or archive - they only add, update, link.
 ## PostCompact analog (lifecycle hook) - shipped
 
 The Claude PostCompact hook fires on context compaction to propagate the session
-into the vault. Hermes's analog is the `on_session_end` event hook (declared
+into the vault. Hermes's analog is the `on_session_finalize` event hook (declared
 under the `hooks:` block of `~/.hermes/config.yaml`). This build ships it:
 
-- **`hooks/obsidian-hermes-session-end.sh`** - an `on_session_end` hook that, on
+- **`hooks/obsidian-hermes-session-end.sh`** - an `on_session_finalize` hook that, on
   a completed (non-interrupted) session, runs the `obsidian-nightly`
   consolidation pass and prints `{}` (the observer-hook contract). It mirrors the
   Claude bg-agent's trust model exactly: OPT-IN, ships INERT, no-ops unless BOTH
   `OBSIDIAN_VAULT_PATH` and `OBSIDIAN_HERMES_HOOK_ENABLED=1` are set; add/update
-  /link only, never delete or archive.
+  /link only, never delete or archive. It starts at most one consolidation per
+  `OBSIDIAN_HERMES_MIN_INTERVAL` seconds (default 21600, 6 hours; 0 turns it off).
 - **`hooks/hermes-hooks.config.example.yaml`** - the paste-in
   `hooks:` block for `~/.hermes/config.yaml` registering the hook.
 
@@ -303,9 +308,46 @@ Install:
 mkdir -p ~/.hermes/agent-hooks
 cp hooks/obsidian-hermes-session-end.sh ~/.hermes/agent-hooks/
 chmod +x ~/.hermes/agent-hooks/obsidian-hermes-session-end.sh
-# merge hooks/hermes-hooks.config.example.yaml into your ~/.hermes/config.yaml,
-# then: export OBSIDIAN_VAULT_PATH=... OBSIDIAN_HERMES_HOOK_ENABLED=1
+# merge hooks/hermes-hooks.config.example.yaml into your ~/.hermes/config.yaml
 ```
+
+Add these two lines to `~/.hermes/.env` (`$HERMES_HOME/.env` if you set
+`HERMES_HOME`):
+
+```bash
+OBSIDIAN_VAULT_PATH=/absolute/path/to/your/vault
+OBSIDIAN_HERMES_HOOK_ENABLED=1
+```
+
+Then record your consent and check it:
+
+```bash
+hermes --accept-hooks -z "reply OK"   # spends one model call
+hermes hooks list                     # the hook should now show as allowed
+```
+
+Both steps fail silently if skipped, because the hook can run inside the gateway:
+
+- A shell `export` does not reach a gateway that is already running or runs as a
+  service, and without the two variables the hook does nothing.
+- Hermes skips a shell hook nobody consented to, and only a foreground
+  `hermes chat` asks. The gateway logs a warning and carries on.
+
+When the event fires (read from Hermes source at commit 071d31f, 2026-11-07;
+not live-tested, #374):
+
+- CLI chat: `/new` and closing the chat fire it.
+- One-shot `hermes -z`: the run closes its session through the gateway, and the
+  gateway fires `on_session_finalize` once that session is idle. If the close
+  never reaches the gateway, the gateway ends the session after
+  `sessions.orphan_end_grace_s` (default 300 seconds). Keep the gateway running
+  at least that long when you test.
+- Messaging gateway (Telegram etc.): it fires when the chat starts a new session
+  (`/new`) or the gateway shuts down, not after each message.
+
+Builds before November 2026 ran `-z` outside the gateway, and live runs on them
+never saw the event. If your build never fires it, the `obsidian-nightly` cron
+job still runs the same maintenance once a day.
 
 The consolidation runs headlessly via `hermes -z` (one-shot mode: prompt passed
 as the argument, only the final response printed). Override the command with

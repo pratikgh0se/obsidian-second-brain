@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Eugeniu Ghelbur and contributors
+# SPDX-License-Identifier: MIT
+# Author: Eugeniu Ghelbur (AI Automation Engineer, AI Tooling Engineer, AI Educator), https://github.com/eugeniughelbur/obsidian-second-brain
+# Questions or consulting: e.ghelbur@gmail.com | https://www.linkedin.com/in/eugeniu-ghelbur/ | More: https://theaioperator.io | https://x.com/eugeniu_ghelbur
 """YouTube transcript + Data API client.
 
 Transcripts work without an API key (youtube-transcript-api).
@@ -8,6 +12,25 @@ import re
 from typing import Any
 
 from .config import YOUTUBE_API_KEY, get_optional
+
+_KEY_PARAM = re.compile(r"(?i)\b(key|api_key|apikey|access_token)=[^&\s\"'<>]+")
+
+
+def _api_error_summary(e: Exception) -> str:
+    """A log-safe one-line summary of a Data API failure.
+
+    googleapiclient's HttpError renders the full request URL, and that URL
+    carries the API key as a query parameter. Report only the HTTP status and
+    reason when the error has them; otherwise redact key-like parameters from
+    the message before it is printed.
+    """
+    resp = getattr(e, "resp", None)
+    status = getattr(resp, "status", None) if resp is not None else None
+    if status is not None:
+        reason = getattr(resp, "reason", None) or ""
+        return f"{type(e).__name__}: HTTP {status} {reason}".rstrip()
+    message = _KEY_PARAM.sub(r"\1=REDACTED", str(e))
+    return f"{type(e).__name__}: {message}"
 
 
 def parse_video_id(url_or_id: str) -> str:
@@ -94,7 +117,7 @@ def get_video_metadata(video_id: str) -> dict[str, Any] | None:
             "comment_count": int(st.get("commentCount", 0)) if "commentCount" in st else None,
         }
     except Exception as e:
-        print(f"[YouTube metadata error: {type(e).__name__}: {e}]")
+        print(f"[YouTube metadata error: {_api_error_summary(e)}]")
         return None
 
 
@@ -130,5 +153,5 @@ def get_top_comments(video_id: str, max_results: int = 20) -> list[dict[str, Any
             })
         return out
     except Exception as e:
-        print(f"[YouTube comments error: {type(e).__name__}: {e}]")
+        print(f"[YouTube comments error: {_api_error_summary(e)}]")
         return []

@@ -88,6 +88,16 @@ def test_full_chain_spawns_agent_with_summary(tmp_path):
     # plain `pwd` elsewhere; as_posix() is the same string on both.
     assert f"CWD={vault.as_posix()}" in body, "agent must run inside the vault"
     assert "ARG=--dangerously-skip-permissions" in body
+    # With permissions skipped, --allowedTools alone is not a boundary: it only
+    # pre-approves tools, and every other built-in tool stays available.
+    # --tools is what limits the set, so it must be present with the
+    # filesystem-only list.
+    args = [line[len("ARG="):] for line in body.partition("STDIN<<<")[0].splitlines()
+            if line.startswith("ARG=")]
+    assert "--tools" in args, "bg agent must restrict tools with --tools"
+    tools = args[args.index("--tools") + 1].split(",")
+    assert sorted(tools) == sorted(["Read", "Write", "Edit", "Glob", "Grep"])
+    assert not {"Bash", "WebFetch", "WebSearch"} & set(tools)
     assert "SUMMARY-SENTINEL" in body, "the compact summary must reach the prompt"
     assert "met a new person" in body, "multi-line summaries must survive the base64 hop"
     # The prompt must arrive via stdin, never as an argv element - passing it as
