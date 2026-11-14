@@ -13,7 +13,7 @@ Use the obsidian-second-brain skill. Execute `/obsidian-find $ARGUMENTS`:
 The argument is the search query.
 
 1. Read `_CLAUDE.md` first if it exists in the vault root
-2. Search the vault for the query using the ranked keyword search where it is available: the `obsidian_search` MCP tool, or `vault_ops.search` directly (`integrations/obsidian-mcp-server/`). It applies stopword filtering and length-normalized ranking, so a short note with the term in its title outranks a long note that merely repeats it. In Claude Code (where no search tool is bound), grep the vault and read the top matches directly, applying the same judgement: ignore filler words, and do not let long `raw/` transcripts or `log.md` outrank a canonical `wiki/` note.
+2. Search the vault for the query using the vault's search where it is available (hybrid keyword + semantic; keyword-only if Ollama is down): the `obsidian_search` MCP tool, or `vault_ops.search` directly (`integrations/obsidian-mcp-server/`). It applies stopword filtering and length-normalized ranking, so a short note with the term in its title outranks a long note that merely repeats it. Where neither is bound, grep the vault and read the top matches directly, applying the same judgement: ignore filler words, and do not let long `raw/` transcripts or `log.md` outrank a canonical `wiki/` note.
 3. Also try variations if results are sparse (synonyms, related terms)
 4. Return results with context: note title, folder, a relevant excerpt, and what type of note it is
 5. If results are ambiguous, group them by type (people, projects, tasks, etc.)

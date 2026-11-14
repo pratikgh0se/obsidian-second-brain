@@ -30,13 +30,16 @@ This command can run manually or as a scheduled agent. It thinks for you.
    - Create `Synthesis - Title.md` in the concepts folder (resolved per `references/folder-map.md`) with:
      ```yaml
      ---
+     type: synthesis
      date: YYYY-MM-DD
      tags:
        - concept
        - synthesis
+     ai-first: true
      auto_generated: true
      ---
      ```
+     Start the body with the `## For future agent` preamble.
    - Document: what pattern was found, which sources/notes it came from (with links), what it means, and a suggested action
    - Link the synthesis page FROM all the source notes it references
 

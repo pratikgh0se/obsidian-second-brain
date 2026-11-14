@@ -10,7 +10,7 @@ triggers_zh: ["测试知识库搜索效果", "评估检索质量", "看看我的
 
 Use the obsidian-second-brain skill. Execute `/obsidian-retrieval-eval $ARGUMENTS`:
 
-You cannot improve retrieval you have not measured. This scores the vault's REAL search (the term-frequency, title-weighted ranking in `integrations/obsidian-mcp-server/vault_ops.py`, the same engine behind `/obsidian-find` and the MCP connector) against natural-language questions whose correct answer note is known - so "should I add a vector index / better ranking?" becomes a number and a list of failures, not a hunch.
+You cannot improve retrieval you have not measured. This scores the vault's REAL search (the hybrid keyword + semantic stack behind `/obsidian-find` and the MCP connector; `--mode lexical` isolates the keyword arm in `integrations/obsidian-mcp-server/vault_ops.py`) against natural-language questions whose correct answer note is known - so "should I add a vector index / better ranking?" becomes a number and a list of failures, not a hunch.
 
 The optional argument is a number of cases to (re)generate first (without `XAI_API_KEY` the generator silently falls back to verbatim-sentence heuristics - fine for keyword-style cases, weak for paraphrase-style) (e.g. `30`), or `report` to also write the result to the vault. No argument: evaluate the existing cases.
 
@@ -30,9 +30,9 @@ The optional argument is a number of cases to (re)generate first (without `XAI_A
 
 4. Interpret the numbers for the user in plain language: what fraction of natural-language questions surface the right note, and the dominant failure pattern (e.g. long `raw/` sources and `log.md` outranking short canonical notes; title-weighting helping only when the query reuses title words). Name the specific notes that wrongly ranked #1 from the JSON.
 
-5. Turn failures into concrete, testable retrieval fixes ranked by leverage - e.g. exclude `raw/` and `log.md` from search, boost notes by `type:` (canonical concept/entity/project over transcripts), add alias/heading indexing, or add semantic matching. Each fix is a hypothesis: re-run this eval on the SAME cases after the change to confirm it actually raised recall, never assume.
+5. Turn failures into concrete, testable retrieval fixes ranked by leverage - e.g. exclude `raw/` and `log.md` from search, boost notes by `type:` (canonical concept/entity/project over transcripts), add alias/heading indexing, or tune the semantic arm or fusion weights. Each fix is a hypothesis: re-run this eval on the SAME cases after the change to confirm it actually raised recall, never assume.
 
-6. If the user passed `report` (or asks to save), write an AI-first baseline note to `wiki/concepts/` (resolve per `references/folder-map.md`), `type: synthesis`, tagged `[retrieval, eval]`, linked from a retrieval-quality project note if one exists: record the engine, the case count, the recall@k / MRR numbers with the date as a recency marker, the top failure patterns with example notes, and the ranked fix hypotheses. This is the before-number every future retrieval change is measured against.
+6. If the user passed `report` (or asks to save), write an AI-first baseline note to the concepts folder (resolve per `references/folder-map.md`: `wiki/concepts/` in wiki-style vaults, `Ideas/` in Obsidian-style ones), `type: synthesis`, tagged `[retrieval, eval]`, linked from a retrieval-quality project note if one exists: record the engine, the case count, the recall@k / MRR numbers with the date as a recency marker, the top failure patterns with example notes, and the ranked fix hypotheses. This is the before-number every future retrieval change is measured against.
 
 Measure, change one thing, measure again. That loop - not a guess about vector databases - is how retrieval actually improves.
 
