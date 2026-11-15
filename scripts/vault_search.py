@@ -37,7 +37,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     # ASCII escapes, not raw UTF-8: a Windows console in a legacy code page cannot
     # print a CJK or emoji title and would crash after the search succeeded.
-    print(json.dumps(results))
+    # `chunk` is eval telemetry for the MCP server; the CLI contract stays path/title/snippet.
+    print(json.dumps([{k: v for k, v in r.items() if k != "chunk"} for r in results]))
     return 0
 
 

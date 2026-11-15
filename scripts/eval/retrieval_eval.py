@@ -41,6 +41,7 @@ import json
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -423,7 +424,7 @@ def _split_external_cmd(cmd: str) -> list[str]:
     return parts
 
 
-def _searcher(mode: str):
+def _searcher(mode: str, on_semantic_fallback=None):
     """Return a (label, fn(query)->results) for the chosen retrieval mode.
 
     Four modes, four TRUE labels (stress-test fix 10/24 - before this, "lexical"
@@ -439,6 +440,11 @@ def _searcher(mode: str):
         return "pure lexical: term-frequency, title-weighted (fusion off)", \
             lambda q: vault_ops.search(q, limit=SEARCH_LIMIT, semantic=False)
     if mode == "default":
+        if on_semantic_fallback is not None:
+            return "shipped default: vault_ops.search (lexical + semantic RRF when available)", \
+                lambda q: vault_ops.search(
+                    q, limit=SEARCH_LIMIT, on_semantic_fallback=on_semantic_fallback
+                )
         return "shipped default: vault_ops.search (lexical + semantic RRF when available)", \
             lambda q: vault_ops.search(q, limit=SEARCH_LIMIT)
     if mode == "external":
@@ -526,7 +532,15 @@ def evaluate(cases_path: Path, as_json: bool, mode: str = "lexical") -> int:
         print("Cases file is empty.", file=sys.stderr)
         return 1
 
-    label, search_fn = _searcher(mode)
+    fallback_reasons: Counter[str] = Counter()
+
+    def record_semantic_fallback(reason: str) -> None:
+        fallback_reasons[reason] += 1
+
+    label, search_fn = _searcher(
+        mode,
+        on_semantic_fallback=record_semantic_fallback if mode == "default" else None,
+    )
     per_case: list[dict[str, Any]] = []
     for c in cases:
         try:
@@ -577,6 +591,11 @@ def evaluate(cases_path: Path, as_json: bool, mode: str = "lexical") -> int:
         summary["stale_hit_rate"] = None
     summary["floor"] = floor_block(recall[5])
     summary["cases_file"] = cases_path.name
+    if mode == "default":
+        summary["semantic_fallbacks"] = {
+            "queries": sum(fallback_reasons.values()),
+            "reasons": dict(sorted(fallback_reasons.items())),
+        }
 
     if as_json:
         # Force UTF-8 stdout: on Windows a pipe defaults to cp1252, which cannot
@@ -607,6 +626,15 @@ def evaluate(cases_path: Path, as_json: bool, mode: str = "lexical") -> int:
         print(f"  stale hits {summary['stale_hit_rate']*100:.1f}% of cases were topped "
               f"by a superseded note")
     print(f"  misses (gold not in top {SEARCH_LIMIT}): {len(misses)}   buried (rank>3): {len(buried)}")
+    if mode == "default":
+        fallbacks = summary["semantic_fallbacks"]
+        reasons = ", ".join(
+            f"{reason}: {count}" for reason, count in fallbacks["reasons"].items()
+        ) or "none"
+        print(
+            f"  semantic fallback: {fallbacks['queries']}/{n} queries ({reasons})",
+            file=sys.stderr,
+        )
 
     if misses:
         print("\nMisses - the right note never surfaced:")

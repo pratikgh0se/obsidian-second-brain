@@ -7,7 +7,7 @@
 <h1 align="center">obsidian-second-brain: AI second brain for Obsidian - persistent memory for Claude Code, Codex, Cursor and Grok Bot</h1>
 
 <p align="center">
-  <b>Your AI second brain for <a href="https://obsidian.md">Obsidian</a>. Free, open source, and plain Markdown you own.</b><br />
+  <b>Your AI second brain for Obsidian. Free, open source, and plain Markdown you own.</b><br />
   Talk to Claude as usual. It saves what matters to your vault and remembers it next time.
 </p>
 
@@ -68,6 +68,8 @@ Restart Claude Code and run `/obsidian-second-brain:obsidian-init` inside your v
 
 No vault yet, another AI tool, or bare command names? See the [full install guide](#install).
 
+**On Grok Bot?** Start with one prompt and no install: [GROK-BOT.md](GROK-BOT.md).
+
 <p align="center">
   <em>If this helps you, a <a href="https://github.com/eugeniughelbur/obsidian-second-brain">star</a> helps other people find it.</em>
 </p>
@@ -96,7 +98,9 @@ You take notes in Obsidian. Hundreds of files. They just sit there. You make the
 
 I'm Eugeniu Ghelbur, an AI automation engineer. I built this for my own vault, and I still run my work on it every day. I review and merge every change myself, and close to 50 people have shipped fixes so far ([see who](#contributors)).
 
-I write up what I learn twice a week on [The AI Operator](https://theaioperator.io/subscribe?utm_source=github&utm_medium=readme&utm_campaign=who-builds-this), and post shorter notes on [X](https://x.com/eugeniu_ghelbur) and [LinkedIn](https://www.linkedin.com/in/eugeniu-ghelbur/).
+I write up what I learn 3 times a week on [The AI Operator](https://theaioperator.io/subscribe?utm_source=github&utm_medium=readme&utm_campaign=who-builds-this), and post shorter notes on [X](https://x.com/eugeniu_ghelbur) and [LinkedIn](https://www.linkedin.com/in/eugeniu-ghelbur/).
+
+Not a coder? [The Vault](https://theaioperator.io/s/vault?utm_source=github&utm_medium=readme&utm_campaign=vault) has 7 ready-made AI tools for paid readers, including Claude memory and an Obsidian folder set up for AI. Each one takes 10 minutes or less, with no code.
 
 ---
 
@@ -796,6 +800,8 @@ The **Pi build emits a native [Pi](https://pi.dev) package**: prompt templates u
 Obsidian Second Brain turns what's on your mind into linked notes in your Obsidian vault, keeps your daily notes, and answers your questions from your own notes with links back to the source.
 
 Start from the official Obsidian Second Brain bot template: https://x.ai/bot/Oj_doyprowDl817Yk5Rbh
+
+To try it with no setup first, paste the starter prompt from [GROK-BOT.md](GROK-BOT.md) into a Grok Bot chat.
 
 ### Grok Bot / Sand
 
