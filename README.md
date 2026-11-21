@@ -26,8 +26,9 @@
   <img src="https://img.shields.io/github/v/release/eugeniughelbur/obsidian-second-brain?color=green" alt="Release" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT" />
   <img src="https://img.shields.io/github/stars/eugeniughelbur/obsidian-second-brain?color=yellow" alt="Stars" />
-  <a href="https://theaioperator.io/subscribe?utm_source=github&utm_medium=readme&utm_campaign=top"><img src="https://img.shields.io/badge/Substack-The_AI_Operator-FF6719?logo=substack&logoColor=white" alt="Subscribe on Substack" /></a>
 </p>
+
+<p align="center"><b>Free newsletter:</b> what I learn building this, 3 posts a week. <a href="https://theaioperator.io/subscribe?utm_source=github&utm_medium=readme&utm_campaign=top-text"><b>Subscribe to The AI Operator &rarr;</b></a></p>
 
 **Claude forgets you when a chat ends. Your Obsidian vault doesn't.** This skill connects the two, so every chat adds to one set of linked notes that the next chat reads.
 
@@ -43,10 +44,10 @@ Your notes stay as Markdown files on your computer. The core commands need no AP
 
 <p align="center">
   <a href="DEMOS.md">
-    <img src="media/obsidian-save.gif" alt="One /obsidian-save command turns a conversation into five cross-linked AI-first notes: a person, a project with the decision, a task, a board card, and the daily note." width="100%" />
+    <img src="media/obsidian-save-explainer.gif" alt="Animated walkthrough: you tell Claude Code about a meeting, type /obsidian-save, and five linked notes land in Obsidian. Then /obsidian-ingest reads a PDF checklist and updates the project and task notes you already have. The graph view connects them, and the next day Claude answers from the vault." width="100%" />
   </a>
   <br />
-  <em>One <code>/obsidian-save</code>, five linked notes. Real footage, made-up vault. <a href="DEMOS.md">More demos &rarr;</a></em>
+  <em>Save a chat, feed it a PDF, and Claude remembers. Animated walkthrough of a made-up example. <a href="DEMOS.md">Real terminal footage &rarr;</a></em>
 </p>
 
 ## Quick start
@@ -198,6 +199,7 @@ Each agent sees what the others finished and can leave a lesson for review.
 
 - Grok Bot joins the same team through its existing runner.
 - A lesson becomes a rule only when a human runs `keep`.
+- A new session's hook read shows other agents' recent jobs first, then open lessons. Kept and dropped lessons stay in `show` and `digest`. The read stays short enough for the host to inject the whole text.
 - Crew runs no background loop.
 
 ```bash
@@ -988,6 +990,9 @@ Yes. The skill writes to your vault as standard markdown files. Obsidian Sync, i
 
 ### Can I add notes from my phone?
 Yes, through the optional Telegram bot. Send a voice note while you walk, and it is transcribed into today's daily note. Photos, PDFs and links are filed too. See [Capture from your phone](#capture-from-your-phone-optional).
+
+### Can I bring in my ChatGPT, Claude.ai or Gemini chats?
+Yes, in two steps. An exporter saves each chat as a Markdown file in a folder outside the vault, then `/obsidian-ingest` turns the chats you pick into notes. A chat is graded `speculation`, the lowest trust grade, so it can add notes but cannot change one you already have without your yes. Setup, settings and limits: see [AI-CHATS.md](AI-CHATS.md).
 
 ### Can I use it in a language other than English?
 Yes: talk to your agent in your own language and keep the vault in English. The agent translates what you say before it writes a note, replies in your language, and searches with English queries. This passes every vault rule, and search quality is measured on English notes, so you stay on the tested path. Put the rule in `<vault>/.claude/CLAUDE.md`, not `_CLAUDE.md`, so an `/obsidian-init` re-run keeps it. [andreanovix](https://github.com/andreanovix) shared a working block in [discussion #307](https://github.com/eugeniughelbur/obsidian-second-brain/discussions/307). Notes in Chinese, Japanese or Korean, command phrases in five languages, and encoding: see [LANGUAGES.md](LANGUAGES.md).
